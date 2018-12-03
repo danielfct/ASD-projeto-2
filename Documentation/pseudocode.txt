@@ -15,18 +15,14 @@ Upon init() do:
  serviceMap <- <null,null> // hashmap with results of put operations
  canExecute <- false // indicates if it's possible to execute an operations ( false if there aren't any or there are gaps between them: x x _ x )
  paxosInstances <- <null,null> // map with paxos instances for each position in the state machine sequence of operations
- setup periodic timer executeOperations(T)
- setup periodic timer isLeaderAlive(T)
 
 Upon start(n, membership, clt) do:
  mySequenceNumber <- n
  replicas <- membership
  majority <- (|replicas| + 1) / 2
  client <- clt
- if mySequenceNumber = |replicas| then
-  currentLeader <- self
-  mySequenceNumber <- 0
- else currentLeader <- getReplicaWithHigherSequenceNumber(replicas)
+ setup periodic timer isLeaderAlive(T)
+ setup periodic timer executeOperations(T)
 
 Upon put(key, value) do:
  operation <- {type: "PUT", param1: key, param2: value}
@@ -62,7 +58,7 @@ Upon propose(operation) do:
  currentN <- currentN + 1
 
 Upon prepare(N,n) do:
- if n >= myPromise then
+ if n > myPromise then
   myPromise <- n
   send(sender, PREPARE_OK, sequenceNumberOfAcceptedOperation, acceptedOperation)
 
@@ -129,7 +125,7 @@ Upon executeOperations() do:
   canExecute <- true
 
 Upon isLeaderAlive() do:
- if currentLeader != null && currentLeader != self && currentTime() > keepAlive + TTL then
+ if currentLeader == null || (currentLeader != self && currentTime() > keepAlive + TTL) then
   for each rep € replicas do
    sender(rep, PREPARE, N, mySequenceNumber) // TODO: N logic
 
