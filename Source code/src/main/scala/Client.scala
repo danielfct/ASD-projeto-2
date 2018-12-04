@@ -3,11 +3,11 @@ import com.typesafe.config.{ Config, ConfigFactory }
 
 object Client extends App  {
   val config: Config = ConfigFactory.load()
-  val systemName = config.getString("actorSystem.name")
+  val systemName: String = config.getString("actorSystem.name")
   println(s"$systemName")
-  val ip = config.getString("actorSystem.ip")
+  val ip: String = config.getString("actorSystem.ip")
   println(s"$ip")
-  val port = config.getString("actorSystem.port")
+  val port: String = config.getString("actorSystem.port")
   println(s"$port")
   val actors: Array[String] = config.getString("actorSystem.actors").split(",")
   actors.foreach { println }
