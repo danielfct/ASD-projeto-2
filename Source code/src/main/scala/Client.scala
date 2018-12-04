@@ -3,14 +3,12 @@ import com.typesafe.config.{ Config, ConfigFactory }
 
 object Client extends App  {
   val config: Config = ConfigFactory.load()
-  val systemName: String = config.getString("actorSystem.name")
-  println(s"$systemName")
-  val ip: String = config.getString("actorSystem.ip")
-  println(s"$ip")
-  val port: String = config.getString("actorSystem.port")
-  println(s"$port")
-  val actors: Array[String] = config.getString("actorSystem.actors").split(",")
-  actors.foreach { println }
+  val systemName: String = config.getString("remoteSystem.name")
+  for (i <- 1 to 5) {
+    val name: String = config.getString(s"remoteSystem.actor$i.name")
+    val ip: String = config.getString(s"remoteSystem.actor$i.ip")
+    val port: String = config.getString(s"remoteSystem.actor$i.port")
+    println(s"actor: akka.tcp://$systemName@$ip:$port/user/$name")
+  }
 }
-
 
