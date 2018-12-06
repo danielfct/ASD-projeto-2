@@ -14,7 +14,11 @@ object Tester extends App {
   
   actors.keySet.foreach(k => actors(k) ! Start(actors))
   
-  Thread.sleep(10000);
+  /*Thread.sleep(10000);
   
   actors(5) ! Kill
+  
+  Thread.sleep(10000)
+  
+  actors.values.foreach(a => a ! Debug)*/
 }
