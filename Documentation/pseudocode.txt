@@ -1,7 +1,7 @@
 ########## State Machine ##########
 
 State: mySequenceNumber, currentLeader, replicas, majority, client, myPromise, sequenceNumberOfAcceptedOperation, 
-acceptedOperation, currentN, operationsToExecute, serviceMap, prepareAcks, resultsBackup
+acceptedOperation, acceptedN, currentN, operationsToExecute, serviceMap, prepareAcks, resultsBackup
 
 Upon init() do:
  currentLeader <- null
@@ -35,7 +35,7 @@ Upon join(n, contactNode, clt) do:
 
 Upon put(id, key, value) do:
  operation <- {type: "PUT", param1: key, param2: value, reqid: id}
- send(currentLeader, PROPOSE, operation)
+ send(currentLeader, PROPOSE, operation, true)
 
 Upon get(key) do:
  value <- serviceMap.getValueOfKey(key)
@@ -50,22 +50,23 @@ Upon response(value) do:
 Upon add_replica(rep) do:
  if currentLeader = self then
   operation <- {type: "ADD_REPLICA", param1: rep, param2: null}
-  send(self, PROPOSE, operation)
+  send(self, PROPOSE, operation, false)
  else send(currentLeader, ADD_REPLICA, rep)
 
-Upon propose(operation) do:
- if (resultsBackup.contains(operation.reqid)) then {
+Upon propose(operation, reply) do:
+ if (resultsBackup.containsKey(operation.reqid)) then {
   value <- resultsBackup.get(operation.reqid)
   send(sender, RESPONSE, value)
  } else {
-  send(sender, RESPONSE, serviceMap.get(key))
+  if (reply) then 
+   send(sender, RESPONSE, serviceMap.get(key))
   paxos.propose(currentN,operation)
  }
  
 Upon prepare(N,n) do:
  if n > myPromise then
   myPromise <- n
-  send(sender, PREPARE_OK, n, mySequenceNumber, currentN)
+  send(sender, PREPARE_OK, n, acceptedN, sequenceNumberOfAcceptedOperation)
  else send(sender, RESTART, n)
 
 Upon prepare_ok(s, N, n) do:
@@ -77,7 +78,7 @@ Upon prepare_ok(s, N, n) do:
    for each rep € replicas do
     send(rep, SET_LEADER, self)
    operation <- {type: "REMOVE_REPLICA", param1: currentLeader, param2: null}
-   send(self, PROPOSE, operation)
+   send(self, PROPOSE, operation, false)
    currentLeader <- self
    setup periodic timer leaderAlive(T)
  }
@@ -85,8 +86,8 @@ Upon prepare_ok(s, N, n) do:
 Upon accept(N, n, operation) do:
  paxos.accept(N, n, operation)
 
-Upon accept_ok(N, n) do:
- paxos.accept_ok(N, n)
+Upon accept_ok(n) do:
+ paxos.accept_ok(n)
 
 Upon decided(N, operation) do:
  operationsToExecute.put(N,operation)
@@ -162,13 +163,18 @@ Upon restart(n) do:
 Upon setSequenceNumber(n) do:
  mySequenceNumber <- n
 
+Upon setState(na,va1,va2) do:
+ sequenceNumberOfAcceptedOperation <- na
+ acceptedN <- va1
+ acceptedOperation <- va2
+
 ########## State Machine ##########
 
 
 ########## Multi Paxos ##########
 
 State: mySequenceNumber, replicas, majority, acceptAcks, currentProposedOperation, 
-myPromise, sequenceNumberOfAcceptedOperation, acceptedOperation, canPropose, operationsToPropose
+myPromise, acceptedOperation, acceptedPosition, canPropose, operationsToPropose
 
 Upon init(smachine,reps,sequenceNumber) do:
  stateMachine <- smachine
@@ -199,21 +205,21 @@ Upon doPropose() do:
    setup timer restart(T, mySequenceNumber)
   }
 
-Upon accept(N, n, operation) do:
+Upon accept(n, N, operation) do:
  keepAlive <- currentTime()
  if n >= myPromise then {
-  acceptedPosition <- N
-  sequenceNumberOfAcceptedOperation <- n
-  acceptedOperation <- operation
-  send(sender, ACCEPT_OK, N, n)
+  acceptedPosition <- N // va1
+  acceptedOperation <- operation //va2
+  send(sender, ACCEPT_OK, n)
+  stateMachine.setState(n,N,operation)
  } else send(sender, RESTART, n)
 
-Upon accept_ok(N, n) do:
+Upon accept_ok(n) do:
  acceptAcks <- acceptAcks + 1
  if |acceptAcks| >= majority then {
   cancel timer restart
   for each rep € replicas do
-   send(rep, DECIDED, currentN, currentProposedOperation)
+   send(rep, DECIDED, acceptedPosition, acceptedOperation)
   operationsToPropose.removeHead()
   canPropose <- true
  }
@@ -230,11 +236,11 @@ Upon restart(n) do:
 
 Upon addReplica(rep) do:
  replicas <- replicas U {rep}
- majority <- (|replicas| + 1) / 2
+ majority <- ceil((|replicas| + 1) / 2)
 
 Upon removeReplica(rep) do:
  replicas <- replicas \ {rep}
- majority <- (|replicas| + 1) / 2
+ majority <- ceil((|replicas| + 1) / 2)
 
 Upon setPromise(promise) do:
  myPromise <- promise
