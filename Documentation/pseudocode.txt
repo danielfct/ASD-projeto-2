@@ -1,12 +1,12 @@
 ########## State Machine ##########
 
 State: mySequenceNumber, currentLeader, replicas, majority, client, myPromise, sequenceNumberOfAcceptedOperation, 
-acceptedOperation, currentN, operationsToExecute, serviceMap
+acceptedOperation, currentN, operationsToExecute, serviceMap, prepareAcks, resultsBackup
 
 Upon init() do:
  currentLeader <- null
  replicas <- {}
- majority <- 0
+ majority <- POSITIVE_INFINITY
  client <- null // reference to the (single) multi-thread client
  myPromise <- -1
  currentN <- 0 // position to be filled in operationsToExecute 
@@ -14,22 +14,38 @@ Upon init() do:
  keepAlive <- 0
  serviceMap <- <null,null> // hashmap with results of put operations
  canExecute <- false // indicates if it's possible to execute an operations ( false if there aren't any or there are gaps between them: x x _ x )
- paxosInstances <- <null,null> // map with paxos instances for each position in the state machine sequence of operations
+ paxos <- null
+ prepareAcks <- {}
+ resultsBackup <- <null,null> // map of type <reqid,string>. it keeps the result of request id to avoid repeating the same operation
 
 Upon start(n, membership, clt) do:
  mySequenceNumber <- n
  replicas <- membership
- majority <- (|replicas| + 1) / 2
+ majority <- ceil((|replicas| + 1) / 2)
  client <- clt
+ trigger tryToElectMeAsLeader()
+ paxos <- getMultiPaxosInstance(self, mySequenceNumber, replicas)
  setup periodic timer isLeaderAlive(T)
  setup periodic timer executeOperations(T)
 
-Upon put(key, value) do:
- operation <- {type: "PUT", param1: key, param2: value}
+Upon join(n, contactNode, clt) do:
+ mySequenceNumber <- n
+ client <- clt
+ send(contactNode, ADD_REPLICA, self)
+
+Upon put(id, key, value) do:
+ operation <- {type: "PUT", param1: key, param2: value, reqid: id}
  send(currentLeader, PROPOSE, operation)
 
 Upon get(key) do:
- send(currentLeader, GET_FROM_LEADER, key)
+ value <- serviceMap.getValueOfKey(key)
+ if value != null && canExecute then
+  send(client, RESPONSE, value)
+  cancel timer get_from_leader
+ else setup timer get_from_leader(T, key)
+
+Upon response(value) do:
+ send(client, RESPONSE, value)
 
 Upon add_replica(rep) do:
  if currentLeader = self then
@@ -37,61 +53,44 @@ Upon add_replica(rep) do:
   send(self, PROPOSE, operation)
  else send(currentLeader, ADD_REPLICA, rep)
 
-Upon get_from_leader(key) do:
- value <- serviceMap.getValueOfKey(key)
- if value != null && canExecute then
-  send(sender, GET_OK, value)
-  cancel timer get_from_leader
- else setup timer get_from_leader(T, key)
- 
-Upon get_ok(value) do:
- send(client, RESPONSE, value)
-
 Upon propose(operation) do:
- paxos <- paxosInstances.getValueOfKey(currentN)
- if paxos == null then {
-  paxos <- getNewPaxosInstance(self,replicas,mySequenceNumber)
-  paxos.setPromise(myPromise)
-  paxosInstances.put(currentN,paxos)
+ if (resultsBackup.contains(operation.reqid)) then {
+  value <- resultsBackup.get(operation.reqid)
+  send(sender, RESPONSE, value)
+ } else {
+  send(sender, RESPONSE, serviceMap.get(key))
+  paxos.propose(currentN,operation)
  }
- paxos.propose(currentN,operation)
- currentN <- currentN + 1
-
+ 
 Upon prepare(N,n) do:
  if n > myPromise then
   myPromise <- n
-  send(sender, PREPARE_OK, sequenceNumberOfAcceptedOperation, acceptedOperation)
+  send(sender, PREPARE_OK, n, mySequenceNumber, currentN)
+ else send(sender, RESTART, n)
 
-Upon prepare_ok(N, n, operation) do:
- prepareAcks <- prepareAcks U {(n, operation)}
- if |prepareAcks| >= majority then
-  mySequenceNumber <- 0
-  for each rep € replicas do
-   send(rep, SET_LEADER, self)
-  operation <- {type: "REMOVE_REPLICA", param1: currentLeader, param2: null}
-  send(self, PROPOSE, operation)
-  currentLeader <- self
-  setup periodic timer leaderAlive(T)
+Upon prepare_ok(s, N, n) do:
+ if (s == mySequenceNumber) then {
+  prepareAcks <- prepareAcks U {(n, N)}
+  if |prepareAcks| >= majority then
+   currentN <- getPairWithMaxn(prepareacks).N + 1
+   mySequenceNumber <- 0
+   for each rep € replicas do
+    send(rep, SET_LEADER, self)
+   operation <- {type: "REMOVE_REPLICA", param1: currentLeader, param2: null}
+   send(self, PROPOSE, operation)
+   currentLeader <- self
+   setup periodic timer leaderAlive(T)
+ }
 
 Upon accept(N, n, operation) do:
- paxos <- paxosInstances.getValueOfKey(N)
- if paxos == null then {
-  paxos <- getNewPaxosInstance(self,replicas,mySequenceNumber)
-  paxos.setPromise(myPromise)
-  paxosInstances.put(N,paxos)
- }
  paxos.accept(N, n, operation)
 
 Upon accept_ok(N, n) do:
- paxos <- paxosInstances.getValueOfKey(N)
- if paxos == null then {
-  paxos <- getNewPaxosInstance(self,replicas,mySequenceNumber)
-  paxosInstances.put(N,paxos)
- }
  paxos.accept_ok(N, n)
 
 Upon decided(N, operation) do:
  operationsToExecute.put(N,operation)
+ currentN <- currentN + 1
 
 Upon executeOperations() do:
  if operationsToExecute.keySet().size > 0 then {
@@ -112,22 +111,25 @@ Upon executeOperations() do:
    else if operation.type == "ADD_REPLICA" then
     rep <- operation.param1
     replicas <- replicas U {rep}
-    for each p € paxosInstances do
-     p.addReplica(rep)
+    majority <- ceil((|replicas| + 1) / 2)
+    paxos.addReplica(rep)
     if (currentLeader == self) then
-     send(rep, COPY_STATE, replicas, serviceMap)
+     send(rep, COPY_STATE, replicas, serviceMap) // TODO: change this...
    else 
     replicas <- replicas \ {operation.param1}
-    for each p € paxosInstances do
-     p.removeReplica(rep)
+    majority <- ceil((|replicas| + 1) / 2)
+    paxos.removeReplica(rep)
    it.removeLast() // remove pair <key,value> from operationsToExecute, since we have already executed the operation
   }
   canExecute <- true
 
+Upon tryToElectMeAsLeader() do:
+ for each rep € replicas do
+  sender(rep, PREPARE, currentN, mySequenceNumber)
+
 Upon isLeaderAlive() do:
- if currentLeader == null || (currentLeader != self && currentTime() > keepAlive + TTL) then
-  for each rep € replicas do
-   sender(rep, PREPARE, N, mySequenceNumber) // TODO: N logic
+ if (currentLeader != null && currentLeader != self && currentTime() > keepAlive + TTL) then
+  trigger tryToElectMeAsLeader()
 
 Upon set_leader(leader) do:
  if (currentLeader = self && leader != self) then
@@ -146,14 +148,27 @@ Upon leaderAlive() do:
 Upon copy_state(reps, smap) do:
  replicas <- reps
  serviceMap <- smap
+ majority <- ceil((|replicas| + 1) / 2)
+ setup periodic timer isLeaderAlive(T)
+ setup periodic timer executeOperations(T)
+
+Upon restart(n) do:
+ if (n == mySequenceNumber) then {
+  mySequenceNumber = mySequenceNumber + |replicas|
+  paxos.setSequenceNumber(mySequenceNumber)
+  prepareAcks <- {}
+ }
+
+Upon setSequenceNumber(n) do:
+ mySequenceNumber <- n
 
 ########## State Machine ##########
 
 
 ########## Multi Paxos ##########
 
-State: mySequenceNumber, replicas, majority, prepareAcks, acceptAcks, currentProposedOperation, 
-myPromise, sequenceNumberOfAcceptedOperation, acceptedOperation
+State: mySequenceNumber, replicas, majority, acceptAcks, currentProposedOperation, 
+myPromise, sequenceNumberOfAcceptedOperation, acceptedOperation, canPropose, operationsToPropose
 
 Upon init(smachine,reps,sequenceNumber) do:
  stateMachine <- smachine
@@ -162,15 +177,27 @@ Upon init(smachine,reps,sequenceNumber) do:
  majority <- (|replicas| + 1) / 2
  prepareAcks <- {}
  acceptAcks <- 0
- currentProposedOperation <- (null, null, null) // tuple of type (operation, param1, param2?), where param2 is optional
+ currentProposedOperation <- (null, null, null, null) // tuple of type (operation, param1, param2?, reqid?), where param2 and id (of request) are optional
  myPromise <- -1
  acceptedPosition <- 0
+ operationsToPropose <- {}
+ canPropose <- true
+ setup periodic timer doPropose(T)
 
 Upon propose(N,operation) do:
- currentProposedOperation <- operation
- for each rep € replicas do
-   send(rep, ACCEPT, N, mySequenceNumber, currentProposedOperation)
- setup timer restart(T)
+ operationsToPropose <- operationsToPropose U {(N,operation)}
+
+Upon doPropose() do:
+  if (canPropose && |operationsToPropose| > 0) then {
+   canPropose <- false
+   entry <- operationsToPropose.getHead()
+   N <- entry.N
+   operation <- entry.operation
+   currentProposedOperation <- operation
+   for each rep € replicas do
+    send(rep, ACCEPT, N, mySequenceNumber, currentProposedOperation)
+   setup timer restart(T, mySequenceNumber)
+  }
 
 Upon accept(N, n, operation) do:
  keepAlive <- currentTime()
@@ -179,28 +206,40 @@ Upon accept(N, n, operation) do:
   sequenceNumberOfAcceptedOperation <- n
   acceptedOperation <- operation
   send(sender, ACCEPT_OK, N, n)
- }
+ } else send(sender, RESTART, n)
 
 Upon accept_ok(N, n) do:
  acceptAcks <- acceptAcks + 1
- if |acceptAcks| >= majority then
+ if |acceptAcks| >= majority then {
   cancel timer restart
   for each rep € replicas do
    send(rep, DECIDED, currentN, currentProposedOperation)
-
-Upon restart() do:
- prepareAcks <- {}
- acceptAcks <- 0
- sequenceNumber <- sequenceNumber + |replicas| // to make sure the sqn is unique. !CONFIRM this later!
- sender(self, PROPOSE, currentProposedOperation)
+  operationsToPropose.removeHead()
+  canPropose <- true
+ }
+ 
+Upon restart(n) do:
+ if (n == mySequenceNumber) then {
+  prepareAcks <- {}
+  acceptAcks <- 0
+  sequenceNumber <- sequenceNumber + |replicas|
+  stateMachine.setSequenceNumber(sequenceNumber)
+  canPropose <- true
+  sender(self, PROPOSE, currentProposedOperation)
+ }
 
 Upon addReplica(rep) do:
  replicas <- replicas U {rep}
+ majority <- (|replicas| + 1) / 2
 
 Upon removeReplica(rep) do:
  replicas <- replicas \ {rep}
+ majority <- (|replicas| + 1) / 2
 
 Upon setPromise(promise) do:
  myPromise <- promise
+
+Upon setSequenceNumber(n) do:
+ mySequenceNumber <- n
 
 ########## Multi Paxos ##########
