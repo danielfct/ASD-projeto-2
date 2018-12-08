@@ -1,38 +1,41 @@
-import java.io.File
-import com.typesafe.config.{ Config, ConfigFactory }
-import akka.actor._
-import com.typesafe.config.ConfigFactory
-import remote.RemoteActor
+import akka.actor.{Actor, ActorRef, ActorSelection, ActorSystem, Address, Props}
+import com.typesafe.config.{Config, ConfigFactory}
+import replication._
+import Configuration.buildConfiguration
 
-object Client extends App  {
-
-  implicit val system: ActorSystem = ActorSystem("Client")
-  val localActor = system.actorOf(Props[Client], name = "client")  // the local actor
-  localActor ! "START"
-
-}
-
-class Client extends Actor {
-
-  val config: Config = ConfigFactory.load()
-  val systemName: String = config.getString("remoteSystem.name")
-  val remotes: Array[ActorSelection] = Array.ofDim[ActorSelection](5)
-  for (i <- 0 to 4) {
-    val name: String = config.getString(s"remoteSystem.actor$i.name")
-    val ip: String = config.getString(s"remoteSystem.actor$i.ip")
-    val port: String = config.getString(s"remoteSystem.actor$i.port")
-    remotes(i) = context.actorSelection(s"akka.tcp://$systemName@$ip:$port/user/$name")
+object Client extends App {
+  if (args.length < 3) {
+    println("Usage: \"sbt runMain Client ip port replica1 [replica2, ...]\"")
+    System.exit(1)
   }
 
-  var counter = 0
-  def receive: PartialFunction[Any, Unit] = {
+  val hostname = args(0)
+  val port = args(1)
+  val replicasInfo = args.drop(2)
+  val config: Config = buildConfiguration(hostname, port)
+
+  implicit val system: ActorSystem = ActorSystem("ClientSystem", config)
+  val client = system.actorOf(Client.props(replicasInfo), name = "client")
+  client ! "START"
+
+  def props(replicasInfo: Array[String]): Props = Props(new Client(replicasInfo))
+}
+
+class Client(replicasInfo: Array[String]) extends Actor {
+
+  val replicas: Array[ActorSelection] = selectReplicas(replicasInfo)
+
+  def selectReplicas(replicasInfo: Array[String]): Array[ActorSelection] = {
+    val replicas: Array[ActorSelection] = Array.ofDim[ActorSelection](replicasInfo.length)
+    for (i <- replicasInfo.indices) {
+      val replicaInfo: String = replicasInfo(i)
+      replicas(i) = context.actorSelection(s"akka.tcp://StateMachineSystem@$replicaInfo")
+    }
+    replicas
+  }
+
+  override def receive: Receive = {
     case "START" =>
-      remotes(0) ! "Hello from the client"
-    case msg: String =>
-      println(s"client received message: '$msg'")
-      if (counter < 5) {
-        sender ! "Hello back to you"
-        counter += 1
-      }
+
   }
 }

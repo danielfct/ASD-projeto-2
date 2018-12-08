@@ -2,17 +2,17 @@ package replication
 
 import akka.actor.ActorRef
 
-final case class Start(initialReplicas: Map[Int,ActorRef])
+final case class Start(initialReplicas: Set[ActorRef])
 
-final case object TryToElectMeAsLeader
+case object TryToElectMeAsLeader
 
 final case class SetLeader(leadersqn: Int, leader: ActorRef)
 
-final case object SignalLeaderAlive
+case object SignalLeaderAlive
 
-final case object LeaderKeepAlive
+case object LeaderKeepAlive
 
-final case object IsLeaderAlive
+case object IsLeaderAlive
 
 final case class Prepare(n: Int)
 
@@ -30,7 +30,7 @@ final case class Accept_OK(N: Int, sqn: Int)
 
 final case class Decided(N: Int, op: Operation)
 
-final case object ExecuteOperations
+case object ExecuteOperations
 
 final case class Timeout(step: String)
 
@@ -38,8 +38,8 @@ final case class AddReplica(rep: ActorRef)
 
 final case class RemoveReplica(rep: ActorRef)
 
-final case class SetPromise(promise: Int)
+final case class SetPromise(Promise: Int)
 
-final case object Kill
+case object Kill
 
-final case object Debug
+case object Debug

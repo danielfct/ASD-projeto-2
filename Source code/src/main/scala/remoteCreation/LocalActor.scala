@@ -1,4 +1,4 @@
-package remote
+package remoteCreation
 
 import akka.actor._
 import akka.actor.{Address, AddressFromURIString, Deploy, Props}
