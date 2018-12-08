@@ -8,7 +8,7 @@ import scala.concurrent.duration._
 import scala.util.Random
 import scala.util.control.Breaks._
 
-object StateMachine extends App {
+/*object StateMachine extends App {
   if (args.length < 4) {
     println("Usage: \"sbt runMain StateMachine sequenceNumber ip port replica1 [replica2, ...]\"")
     System.exit(1)
@@ -29,6 +29,14 @@ object StateMachine extends App {
   val PUT = "PUT"
   val ADD_REPLICA = "ADD_REPLICA"
   val REMOVE_REPLICA = "REMOVE_REPLICA"
+}*/
+
+object StateMachine {
+  def props(sqn: Int): Props = Props(new StateMachine(sqn))
+  
+  val PUT = "PUT"
+  val ADD_REPLICA = "ADD_REPLICA"
+  val REMOVE_REPLICA = "REMOVE_REPLICA"
 }
 
 class Operation(var operationType: String)
@@ -37,24 +45,25 @@ class ClientOperation(val oType: String, var key: String, var value: Option[Stri
 class ReplicaOperation(var oType: String, var replica: ActorSelection)
   extends Operation(oType)
 
-class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Actor with ActorLogging {
-  override def preStart(): Unit = log.info(s"multipaxos-$sequenceNumber has started!")
-  override def postStop(): Unit = log.info(s"multipaxos-$sequenceNumber has stopped!")
+class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends Actor with ActorLogging {
+  override def preStart(): Unit = log.info(s"stateMachine$sequenceNumber has started!")
+  override def postStop(): Unit = log.info(s"stateMachine$sequenceNumber has stopped!")
 
   var currentN: Int = 0
   var operationsToExecute: SortedMap[Int, Operation] = SortedMap.empty[Int, Operation]
   var serviceMap: Map[String, String] = Map.empty[String, String]
 
+  var oldSqn: Int = sequenceNumber
   var mySequenceNumber: Int = sequenceNumber
-  var replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
+  var replicas = Set.empty[ActorRef] //var replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
   var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
 
   var currentLeader: ActorRef = _
   var myPromise: Int = -1
   var sqnOfAcceptedOp: Int = -1
+  var acceptedN: Int = -1
   var acceptedOp: Operation = _
-  var prepareAcks: List[(Int, Operation)] = List.empty[(Int, Operation)]
-  var numAcceptedAcks: Int = 0
+  var prepareAcks: List[(Int, Int)] = List.empty[(Int, Int)]
 
   var monitorLeaderSchedule: Cancellable = _
   var signalLeaderAliveSchedule: Cancellable = _
@@ -65,7 +74,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
   var keepAlive: Long = 0
   var TTL: Long = 3000
 
-  self ! Start
+  //self ! Start
 
   def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
@@ -76,7 +85,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
     replicas
   }
 
-  private def addClientOperation(operation: ClientOperation): Unit = {
+  /*private def addClientOperation(operation: ClientOperation): Unit = {
     serviceMap += (operation.key -> operation.value.get)
   }
 
@@ -103,10 +112,13 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
       paxosInstances += stateMachinePos -> multipaxos
     }
     multipaxos
-  }
+  }*/
 
   private def overrideLeader(): Unit = {
     Thread.sleep(Random.nextInt(1000))
+    prepareAcks = List.empty[(Int,Int)]
+    if (prepareTimeout != null)
+      prepareTimeout.cancel()
     replicas.foreach(rep => rep ! Prepare(mySequenceNumber))
     prepareTimeout = context.system.scheduler.scheduleOnce(22 seconds, self, Timeout("PREPARE"))
     log.info(s"Statemachine$mySequenceNumber tries to be the leader.")
@@ -114,21 +126,26 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
 
   override def receive: PartialFunction[Any, Unit] = {
 
-    case Start =>
+    case Start(reps) =>
+      replicas = reps
       this.overrideLeader()
 
-    case SetLeader(leadersqn, leader) =>
+    case SetLeader(sqn, leader) =>
       Thread.sleep(Random.nextInt(1000))
-      log.info(s"stateMachine$mySequenceNumber will change its leader to $leader")
-      if (currentLeader == self && leader != self && signalLeaderAliveSchedule != null)
-        signalLeaderAliveSchedule.cancel()
-
-      keepAlive = System.currentTimeMillis()
-      currentLeader = leader
-      myPromise = leadersqn
-
-      if (currentLeader != self)
-        monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, IsLeaderAlive)
+      if (sqn >= myPromise) {
+        log.info(s"stateMachine$mySequenceNumber will change its leader to $leader")
+        if (currentLeader == self && leader != self) {
+          if (signalLeaderAliveSchedule != null)
+            signalLeaderAliveSchedule.cancel()
+          mySequenceNumber = oldSqn
+        }
+  
+        keepAlive = System.currentTimeMillis()
+        currentLeader = leader
+  
+        if (currentLeader != self)
+          monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, IsLeaderAlive)
+      }
 
     case SignalLeaderAlive =>
       log.info(s"stateMachine$mySequenceNumber sent alive signal")
@@ -143,6 +160,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
       log.info(s"stateMachine$mySequenceNumber monitors the leader $currentLeader (ignore null)")
       if (currentLeader != null && currentLeader != self && System.currentTimeMillis() > keepAlive + TTL) {
         monitorLeaderSchedule.cancel()
+        currentLeader = null
         myPromise = -1
         this.overrideLeader()
       }
@@ -152,29 +170,31 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
       log.info(s"stateMachine$mySequenceNumber got prepare from $n")
       if (n > myPromise) {
         myPromise = n
-        sender() ! Prepare_OK(n, sqnOfAcceptedOp, acceptedOp)
+        sender() ! Prepare_OK(n, acceptedN, sqnOfAcceptedOp)
         log.info(s"stateMachine$mySequenceNumber sends prepate_ok to $n")
       }
-      if (currentLeader == self && n > mySequenceNumber) {
+      /*if (currentLeader == self && n > mySequenceNumber) {
         if (signalLeaderAliveSchedule != null)
           signalLeaderAliveSchedule.cancel()
         currentLeader = null
-        log.info(s"stateMachine$mySequenceNumber detects leader with higher sqn. Now my currentLeader = null")
-      }
+        mySequenceNumber = oldSqn
+        log.info(s"stateMachine$mySequenceNumber detects leader with higher sqn. Now my currentLeader = null. Detected n = $n")
+      }*/
       if (n > mySequenceNumber && prepareTimeout != null)
         prepareTimeout.cancel()
 
-    case Prepare_OK(n, sqnAcceptedOp, op) =>
+    case Prepare_OK(n, acceptedN, sqnOfAcceptedOp) =>
       Thread.sleep(Random.nextInt(1000))
       if (n == mySequenceNumber) {
-        prepareAcks = (n, op) :: prepareAcks
+        prepareAcks = (sqnOfAcceptedOp, acceptedN) :: prepareAcks
         log.info(s"stateMachine$mySequenceNumber got prepare_ok")
         if (prepareAcks.size >= majority) {
+          currentN = prepareAcks.maxBy(_._1)._2
           if (prepareTimeout != null )
             prepareTimeout.cancel()
           log.info(s"stateMachine$mySequenceNumber got majority. I'm the leader now.")
-          mySequenceNumber = 0
           replicas.foreach(rep => rep ! SetLeader(mySequenceNumber, self))
+          mySequenceNumber = 0
           /*if (currentLeader != null) {
             val op = new ReplicaOperation(StateMachine.REMOVE_REPLICA, currentLeader)
             self ! Propose(op)
@@ -187,16 +207,16 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
     case Timeout(step) =>
       val old = mySequenceNumber
       mySequenceNumber = mySequenceNumber + replicas.size
+      oldSqn = mySequenceNumber
       log.info(s"stateMachine$old timed out! New sqn=$mySequenceNumber")
-      prepareAcks = List.empty[(Int,Operation)]
-      numAcceptedAcks = 0
+      prepareAcks = List.empty[(Int,Int)]
       step match {
         case "PREPARE" => this.overrideLeader()
         case "PROPOSE"=> // TODO
         case _ => log.info(s"Unexpected timeout with step: $step")
       }
 
-    case SMPropose(operation) =>
+    /*case SMPropose(operation) =>
       val multipaxos = getPaxosInstance(currentN)
       multipaxos ! Propose(currentN, operation)
       currentN += 1
@@ -234,11 +254,11 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
 
     case CopyState(reps, smap) =>
       replicas = reps
-      serviceMap = smap
+      serviceMap = smap*/
 
     case Kill => context.stop(self)
 
-    case Debug => log.info("my leader is {}", currentLeader); context.stop(self)
+    case Debug => log.info("oldId={}. stateMachnine{} -> my leader is {}", oldSqn, mySequenceNumber, currentLeader); context.stop(self)
 
   }
 }

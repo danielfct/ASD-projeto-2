@@ -4,7 +4,7 @@ final case class Start(initialReplicas: Set[ActorRef])
 
 case object TryToElectMeAsLeader
 
-final case class SetLeader(leadersqn: Int, leader: ActorRef)
+final case class SetLeader(sqn: Int, leader: ActorRef)
 
 case object SignalLeaderAlive
 
@@ -14,7 +14,7 @@ case object IsLeaderAlive
 
 final case class Prepare(n: Int)
 
-final case class Prepare_OK(n:Int, sqnAcceptedOp: Int, op: Operation)
+final case class Prepare_OK(n: Int, acceptedN: Int, sqnOfAcceptedOp: Int)
 
 final case class SMPropose(op: Operation)
 
