@@ -1,3 +1,6 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+
 import Configuration.buildConfiguration
 import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, ActorSystem, Cancellable, Props}
 import com.typesafe.config.Config
@@ -5,6 +8,7 @@ import com.typesafe.config.Config
 import scala.collection.SortedMap
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
+import scala.language.postfixOps
 import scala.util.Random
 import scala.util.control.Breaks._
 
@@ -33,7 +37,7 @@ import scala.util.control.Breaks._
 
 object StateMachine {
   def props(sqn: Int): Props = Props(new StateMachine(sqn))
-  
+
   val PUT = "PUT"
   val ADD_REPLICA = "ADD_REPLICA"
   val REMOVE_REPLICA = "REMOVE_REPLICA"
@@ -56,8 +60,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   var oldSqn: Int = sequenceNumber
   var mySequenceNumber: Int = sequenceNumber
   var replicas = Set.empty[ActorRef] //var replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
-  var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-
+  var majority: Int = -1 //var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
   var currentLeader: ActorRef = _
   var myPromise: Int = -1
   var sqnOfAcceptedOp: Int = -1
@@ -66,13 +69,13 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   var prepareAcks: List[(Int, Int)] = List.empty[(Int, Int)]
 
   var monitorLeaderSchedule: Cancellable = _
-  var signalLeaderAliveSchedule: Cancellable = _
+  var leaderHeartbeatSchedule: Cancellable = _
   var prepareTimeout: Cancellable = _
 
   var paxosInstances = Map.empty[Int, ActorRef]
 
-  var keepAlive: Long = 0
-  var TTL: Long = 12000 //6000 for 10 nodes
+  var leaderLastHeartbeat: Long = 0
+  var TTL: Long = 10000 // leader sends heartbeats every 3 seconds
 
   //self ! Start
 
@@ -120,8 +123,28 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     if (prepareTimeout != null)
       prepareTimeout.cancel()
     replicas.foreach(rep => rep ! Prepare(mySequenceNumber))
-    prepareTimeout = context.system.scheduler.scheduleOnce(replicas.size*2 seconds, self, Timeout("PREPARE"))
-    log.info(s"Statemachine$mySequenceNumber tries to be the leader.")
+    prepareTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, Timeout("PREPARE"))
+    log.info(s"${self.path.name} tries to be the leader")
+  }
+
+  private def debug(): Unit = {
+    val name: String = self.path.name
+    println(s"Debug for statemachine $name:")
+    println(s"  - OperationsToExecute: $operationsToExecute")
+    println(s"  - ServiceMap: $serviceMap")
+    println(s"  - CurrentN: $currentN")
+    println(s"  - OldSqn: $oldSqn")
+    println(s"  - MySequenceNumber: $mySequenceNumber")
+    println(s"  - Replicas: $replicas")
+    println(s"  - Majority: $majority")
+    printf("  - CurrentLeader: %s\n", if (currentLeader == null) "null" else currentLeader.path.name)
+    println(s"  - MyPromise: $myPromise")
+    println(s"  - SqnOfAcceptedOp: $sqnOfAcceptedOp")
+    println(s"  - AcceptedN: $acceptedN")
+    println(s"  - AcceptedOp: $acceptedOp")
+    println(s"  - PrepareAcks: $prepareAcks")
+    println(s"  - PaxosInstances: $paxosInstances")
+    println(s"  - LeaderLastHeartbeat: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(leaderLastHeartbeat))}")
   }
 
   override def receive: PartialFunction[Any, Unit] = {
@@ -134,46 +157,62 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     case SetLeader(sqn, leader) =>
       Thread.sleep(Random.nextInt(1000))
       if (sqn >= myPromise) {
-        log.info(s"stateMachine$mySequenceNumber will change its leader to $leader. sqn=$sqn and myPromise was $myPromise")
-        if (currentLeader == self && leader != self) {
-          if (signalLeaderAliveSchedule != null)
-            signalLeaderAliveSchedule.cancel()
+        log.info(s"${self.path.name}.$mySequenceNumber changes its leader to ${leader.path.name}.$sqn ($sqn >= $myPromise)")
+        if (leaderHeartbeatSchedule != null) {
+          leaderHeartbeatSchedule.cancel()
+        }
+        if (monitorLeaderSchedule != null) {
+          monitorLeaderSchedule.cancel()
+        }
+        if (leader == self) { // self becomes leader
+          leaderHeartbeatSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, SignalLeaderAlive)
+          mySequenceNumber = 0
+        }
+        else if (currentLeader == self) { // self is no longer leader
           mySequenceNumber = oldSqn
         }
-  
-        keepAlive = System.currentTimeMillis()
         currentLeader = leader
         myPromise = sqn
-  
-        if (currentLeader != self)
-          monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, IsLeaderAlive)
-      } else log.info(s"stateMachine$mySequenceNumber n mudou merda nenhuma pq sqn=$sqn e myPromise=$myPromise")
+        if (currentLeader != self) {
+          monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, CheckLeaderAlive)
+          leaderLastHeartbeat = System.currentTimeMillis()
+        }
+      }
+      else {
+        log.info(s"${self.path.name}.$mySequenceNumber refuses to change its leader to ${leader.path.name}.$sqn ($sqn < $myPromise)")
+      }
 
     case SignalLeaderAlive =>
-      log.info(s"stateMachine$mySequenceNumber sent alive signal")
-      if (currentLeader == self)
-        replicas.foreach(rep => rep ! LeaderKeepAlive(self))
-      else if (signalLeaderAliveSchedule != null)
-        signalLeaderAliveSchedule.cancel()
+      log.info(s"${self.path.name} sent heartbeat")
+      if (currentLeader == self) {
+        replicas.foreach(rep => if (rep != self) rep ! LeaderHeartbeat)
+      }
+      else if (leaderHeartbeatSchedule != null) {
+        leaderHeartbeatSchedule.cancel()
+      }
 
-    case LeaderKeepAlive(leader) => if (leader == currentLeader) keepAlive = System.currentTimeMillis()
+    case LeaderHeartbeat =>
+      log.info(s"${self.path.name} got heartbeat from ${sender.path.name}")
+      if (sender == currentLeader) {
+        leaderLastHeartbeat = System.currentTimeMillis()
+      }
 
-    case IsLeaderAlive =>
-      log.info(s"stateMachine$mySequenceNumber monitors the leader $currentLeader (ignore null)")
-      if (currentLeader != null && currentLeader != self && System.currentTimeMillis() > keepAlive + TTL) {
+    case CheckLeaderAlive =>
+      log.info(s"${self.path.name} checking health of leader ${currentLeader.path.name}")
+      if (System.currentTimeMillis() > leaderLastHeartbeat + TTL) {
         monitorLeaderSchedule.cancel()
         currentLeader = null
-        //myPromise = -1
         this.overrideLeader()
       }
 
     case Prepare(n) =>
       Thread.sleep(Random.nextInt(1000))
-      log.info(s"stateMachine$mySequenceNumber got prepare from $n")
       if (n > myPromise) {
+        log.info(s"${self.path.name}.$mySequenceNumber sends prepare_ok to ${sender.path.name}.$n ($n > $myPromise)")
         myPromise = n
         sender() ! Prepare_OK(n, acceptedN, sqnOfAcceptedOp)
-        log.info(s"stateMachine$mySequenceNumber sends prepate_ok to $n")
+      } else {
+        log.info(s"${self.path.name}.$mySequenceNumber rejects prepare from ${sender.path.name}.$n ($n <= $myPromise)")
       }
       /*if (currentLeader == self && n > mySequenceNumber) {
         if (signalLeaderAliveSchedule != null)
@@ -189,20 +228,13 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       Thread.sleep(Random.nextInt(1000))
       if (n == mySequenceNumber) {
         prepareAcks = (sqnOfAcceptedOp, acceptedN) :: prepareAcks
-        log.info(s"stateMachine$mySequenceNumber got prepare_ok")
+        log.info(s"${self.path.name}.$mySequenceNumber got prepare_ok from ${sender.path.name}")
         if (prepareAcks.size >= majority) {
           currentN = prepareAcks.maxBy(_._1)._2
-          if (prepareTimeout != null )
+          if (prepareTimeout != null)
             prepareTimeout.cancel()
-          log.info(s"stateMachine$mySequenceNumber got majority. I'm the leader now.")
+          log.info(s"${self.path.name}.$mySequenceNumber got majority. I'm the leader now")
           replicas.foreach(rep => rep ! SetLeader(mySequenceNumber, self))
-          mySequenceNumber = 0
-          /*if (currentLeader != null) {
-            val op = new ReplicaOperation(StateMachine.REMOVE_REPLICA, currentLeader)
-            self ! Propose(op)
-          }*/
-          currentLeader = self
-          signalLeaderAliveSchedule = context.system.scheduler.schedule(3 seconds, 1 second, self, SignalLeaderAlive)
         }
       }
 
@@ -210,10 +242,11 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       val old = mySequenceNumber
       mySequenceNumber = mySequenceNumber + replicas.size
       oldSqn = mySequenceNumber
-      log.info(s"stateMachine$old timed out! New sqn=$mySequenceNumber")
+      log.info(s"${self.path.name}.$old timed out! New sqn=$mySequenceNumber")
       prepareAcks = List.empty[(Int,Int)]
       step match {
-        case "PREPARE" => this.overrideLeader()
+        case "PREPARE" =>
+          this.overrideLeader()
         case "PROPOSE"=> // TODO
         case _ => log.info(s"Unexpected timeout with step: $step")
       }
@@ -258,14 +291,27 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       replicas = reps
       serviceMap = smap*/
 
-    case Kill => context.stop(self)
-
-    case PrepareDebug => {
+    case PrepareDebug =>
       if (monitorLeaderSchedule != null)
         monitorLeaderSchedule.cancel()
-    }
-    
-    case Debug => log.info("oldId={}. stateMachnine{} -> my leader is {}", oldSqn, mySequenceNumber, currentLeader); context.stop(self)
 
+    case Debug =>
+      log.info(s"\nDebug for ${self.path.name}:\n" +
+        s"  - OperationsToExecute: $operationsToExecute\n" +
+        s"  - ServiceMap: $serviceMap\n" +
+        s"  - CurrentN: $currentN\n" +
+        s"  - OldSqn: $oldSqn\n" +
+        s"  - MySequenceNumber: $mySequenceNumber\n" +
+        s"  - Replicas: ${replicas.map(r => r.path.name)}\n" +
+        s"  - Majority: $majority\n" +
+        String.format("  - CurrentLeader: %s\n", if (currentLeader == null) "null" else currentLeader.path.name) +
+        s"  - MyPromise: $myPromise\n" +
+        s"  - SqnOfAcceptedOp: $sqnOfAcceptedOp\n" +
+        s"  - AcceptedN: $acceptedN\n" +
+        s"  - AcceptedOp: $acceptedOp\n" +
+        s"  - PrepareAcks: $prepareAcks\n" +
+        s"  - PaxosInstances: $paxosInstances\n" +
+        s"  - LeaderLastHeartbeat: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(leaderLastHeartbeat))}\n")
   }
+
 }

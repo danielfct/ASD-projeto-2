@@ -31,7 +31,7 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorSelection], sqn: Int, pr
       acceptTimeout = context.system.scheduler.scheduleOnce(3 second, self, Timeout)
 
     case Accept(smPos: Int, sqn: Int, op: Operation) =>
-      stateMachine ! LeaderKeepAlive
+      stateMachine ! LeaderHeartbeat
       if (sqn >= myPromise) {
         acceptedPos = smPos
         sqnOfAcceptedOperation = sqn
