@@ -8,7 +8,7 @@ final case class SetLeader(sqn: Int, leader: ActorRef)
 
 case object SignalLeaderAlive
 
-case object LeaderKeepAlive
+case class LeaderKeepAlive(leader: ActorRef)
 
 case object IsLeaderAlive
 
@@ -39,5 +39,7 @@ final case class RemoveReplica(rep: ActorSelection)
 final case class SetPromise(Promise: Int)
 
 case object Kill
+
+case object PrepareDebug
 
 case object Debug

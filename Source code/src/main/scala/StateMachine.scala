@@ -72,7 +72,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   var paxosInstances = Map.empty[Int, ActorRef]
 
   var keepAlive: Long = 0
-  var TTL: Long = 3000
+  var TTL: Long = 12000 //6000 for 10 nodes
 
   //self ! Start
 
@@ -120,7 +120,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     if (prepareTimeout != null)
       prepareTimeout.cancel()
     replicas.foreach(rep => rep ! Prepare(mySequenceNumber))
-    prepareTimeout = context.system.scheduler.scheduleOnce(22 seconds, self, Timeout("PREPARE"))
+    prepareTimeout = context.system.scheduler.scheduleOnce(replicas.size*2 seconds, self, Timeout("PREPARE"))
     log.info(s"Statemachine$mySequenceNumber tries to be the leader.")
   }
 
@@ -128,12 +128,13 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
 
     case Start(reps) =>
       replicas = reps
+      majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
       this.overrideLeader()
 
     case SetLeader(sqn, leader) =>
       Thread.sleep(Random.nextInt(1000))
       if (sqn >= myPromise) {
-        log.info(s"stateMachine$mySequenceNumber will change its leader to $leader")
+        log.info(s"stateMachine$mySequenceNumber will change its leader to $leader. sqn=$sqn and myPromise was $myPromise")
         if (currentLeader == self && leader != self) {
           if (signalLeaderAliveSchedule != null)
             signalLeaderAliveSchedule.cancel()
@@ -142,26 +143,27 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   
         keepAlive = System.currentTimeMillis()
         currentLeader = leader
+        myPromise = sqn
   
         if (currentLeader != self)
           monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, IsLeaderAlive)
-      }
+      } else log.info(s"stateMachine$mySequenceNumber n mudou merda nenhuma pq sqn=$sqn e myPromise=$myPromise")
 
     case SignalLeaderAlive =>
       log.info(s"stateMachine$mySequenceNumber sent alive signal")
       if (currentLeader == self)
-        replicas.foreach(rep => rep ! LeaderKeepAlive)
+        replicas.foreach(rep => rep ! LeaderKeepAlive(self))
       else if (signalLeaderAliveSchedule != null)
         signalLeaderAliveSchedule.cancel()
 
-    case LeaderKeepAlive => keepAlive = System.currentTimeMillis()
+    case LeaderKeepAlive(leader) => if (leader == currentLeader) keepAlive = System.currentTimeMillis()
 
     case IsLeaderAlive =>
       log.info(s"stateMachine$mySequenceNumber monitors the leader $currentLeader (ignore null)")
       if (currentLeader != null && currentLeader != self && System.currentTimeMillis() > keepAlive + TTL) {
         monitorLeaderSchedule.cancel()
         currentLeader = null
-        myPromise = -1
+        //myPromise = -1
         this.overrideLeader()
       }
 
@@ -258,6 +260,11 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
 
     case Kill => context.stop(self)
 
+    case PrepareDebug => {
+      if (monitorLeaderSchedule != null)
+        monitorLeaderSchedule.cancel()
+    }
+    
     case Debug => log.info("oldId={}. stateMachnine{} -> my leader is {}", oldSqn, mySequenceNumber, currentLeader); context.stop(self)
 
   }
