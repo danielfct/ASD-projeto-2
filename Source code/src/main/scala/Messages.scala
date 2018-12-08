@@ -1,6 +1,4 @@
-package replication
-
-import akka.actor.ActorRef
+import akka.actor.{ActorRef, ActorSelection}
 
 final case class Start(initialReplicas: Set[ActorRef])
 
@@ -20,7 +18,7 @@ final case class Prepare_OK(n:Int, sqnAcceptedOp: Int, op: Operation)
 
 final case class SMPropose(op: Operation)
 
-final case class CopyState(replicas: Set[ActorRef], serviceMap: Map[String,String])
+final case class CopyState(replicas: Set[ActorSelection], serviceMap: Map[String,String])
 
 final case class Propose(N: Int, op: Operation)
 
@@ -34,9 +32,9 @@ case object ExecuteOperations
 
 final case class Timeout(step: String)
 
-final case class AddReplica(rep: ActorRef)
+final case class AddReplica(rep: ActorSelection)
 
-final case class RemoveReplica(rep: ActorRef)
+final case class RemoveReplica(rep: ActorSelection)
 
 final case class SetPromise(Promise: Int)
 

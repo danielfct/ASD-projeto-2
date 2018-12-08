@@ -1,6 +1,5 @@
 import akka.actor.{Actor, ActorRef, ActorSelection, ActorSystem, Address, Props}
 import com.typesafe.config.{Config, ConfigFactory}
-import replication._
 import Configuration.buildConfiguration
 
 object Client extends App {
@@ -23,13 +22,13 @@ object Client extends App {
 
 class Client(replicasInfo: Array[String]) extends Actor {
 
-  val replicas: Array[ActorSelection] = selectReplicas(replicasInfo)
+  val replicas: Set[ActorSelection] = selectReplicas(replicasInfo)
 
-  def selectReplicas(replicasInfo: Array[String]): Array[ActorSelection] = {
-    val replicas: Array[ActorSelection] = Array.ofDim[ActorSelection](replicasInfo.length)
+  def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
+    var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
     for (i <- replicasInfo.indices) {
       val replicaInfo: String = replicasInfo(i)
-      replicas(i) = context.actorSelection(s"akka.tcp://StateMachineSystem@$replicaInfo")
+      replicas += context.actorSelection(s"akka.tcp://StateMachineSystem@$replicaInfo")
     }
     replicas
   }

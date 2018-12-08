@@ -1,20 +1,15 @@
-package replication
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, Cancellable, Props}
 
-import akka.actor.Actor
-import akka.actor.ActorLogging
-import akka.actor.Props
-import akka.actor.ActorRef
-import akka.actor.Cancellable
-import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
 
 object Multipaxos {
-  def props(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise: Int): Props = Props(
+  def props(stateMachine: ActorRef, reps: Set[ActorSelection], sqn: Int, promise: Int): Props = Props(
     new Multipaxos(stateMachine, reps, sqn, promise))
 }
 
-class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise: Int) extends Actor with ActorLogging {
-  var replicas: Set[ActorRef] = reps
+class Multipaxos(stateMachine: ActorRef, reps: Set[ActorSelection], sqn: Int, promise: Int) extends Actor with ActorLogging {
+  var replicas: Set[ActorSelection] = reps
   var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
   var mySequenceNumber: Int = sqn
   var currentProposedOp: Operation = _

@@ -1,16 +1,12 @@
-package replication
-
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, Cancellable, Props}
-
-import scala.concurrent.duration._
-import scala.concurrent.ExecutionContext.Implicits.global
+import Configuration.buildConfiguration
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, ActorSystem, Cancellable, Props}
 import com.typesafe.config.Config
 
 import scala.collection.SortedMap
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
 import scala.util.Random
-import util.control.Breaks._
-import Configuration.buildConfiguration
-
+import scala.util.control.Breaks._
 
 object StateMachine extends App {
   if (args.length < 4) {
@@ -25,8 +21,8 @@ object StateMachine extends App {
   val config: Config = buildConfiguration(hostname, port)
 
   implicit val system: ActorSystem = ActorSystem("StateMachineSystem", config)
-  val client = system.actorOf(StateMachine.props(sequenceNumber, replicasInfo), name = "client")
-  client ! "START"
+  val stateMachine = system.actorOf(StateMachine.props(sequenceNumber, replicasInfo), name = s"stateMachine$sequenceNumber")
+  stateMachine ! "START"
 
   def props(sequenceNumber: Int, replicasInfo: Array[String]): Props =
     Props(new StateMachine(sequenceNumber, replicasInfo))
@@ -35,11 +31,10 @@ object StateMachine extends App {
   val REMOVE_REPLICA = "REMOVE_REPLICA"
 }
 
-
 class Operation(var operationType: String)
 class ClientOperation(val oType: String, var key: String, var value: Option[String] = None)
   extends Operation(oType)
-class ReplicaOperation(var oType: String, var replica: ActorRef)
+class ReplicaOperation(var oType: String, var replica: ActorSelection)
   extends Operation(oType)
 
 class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Actor with ActorLogging {
@@ -51,8 +46,9 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
   var serviceMap: Map[String, String] = Map.empty[String, String]
 
   var mySequenceNumber: Int = sequenceNumber
-  var replicas: Set[ActorRef] = Set.empty[ActorRef]
-  var majority: Int = Int.MaxValue
+  var replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
+  var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
+
   var currentLeader: ActorRef = _
   var myPromise: Int = -1
   var sqnOfAcceptedOp: Int = -1
@@ -64,17 +60,27 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
   var signalLeaderAliveSchedule: Cancellable = _
   var prepareTimeout: Cancellable = _
 
-  var paxosInstances = Map.empty[Int,ActorRef]
+  var paxosInstances = Map.empty[Int, ActorRef]
 
   var keepAlive: Long = 0
   var TTL: Long = 3000
 
+  self ! Start
+
+  def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
+    var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
+    for (i <- replicasInfo.indices) {
+      val replicaInfo: String = replicasInfo(i)
+      replicas += context.actorSelection(s"akka.tcp://StateMachineSystem@$replicaInfo")
+    }
+    replicas
+  }
 
   private def addClientOperation(operation: ClientOperation): Unit = {
     serviceMap += (operation.key -> operation.value.get)
   }
 
-  private def addReplica(replica: ActorRef): Unit = {
+  private def addReplica(replica: ActorSelection): Unit = {
     replicas += replica
     majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
     paxosInstances.values.foreach(p => p ! AddReplica(replica))
@@ -82,7 +88,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
       replica ! CopyState(replicas, serviceMap)
   }
 
-  private def removeReplica(replica: ActorRef): Unit = {
+  private def removeReplica(replica: ActorSelection): Unit = {
     replicas -= replica
     majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
     paxosInstances.values.foreach(p => p ! RemoveReplica(replica))
@@ -103,19 +109,17 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
     Thread.sleep(Random.nextInt(1000))
     replicas.foreach(rep => rep ! Prepare(mySequenceNumber))
     prepareTimeout = context.system.scheduler.scheduleOnce(22 seconds, self, Timeout("PREPARE"))
-    log.info(s"Statemachine-$mySequenceNumber tries to be the leader.")
+    log.info(s"Statemachine$mySequenceNumber tries to be the leader.")
   }
 
   override def receive: PartialFunction[Any, Unit] = {
 
-    case Start(rep) =>
-      this.replicas = rep
-      this.majority = Math.ceil((rep.size + 1.0) / 2.0).toInt
+    case Start =>
       this.overrideLeader()
 
     case SetLeader(leadersqn, leader) =>
       Thread.sleep(Random.nextInt(1000))
-      log.info(s"Statemachine-$mySequenceNumber will change its leader to $leader")
+      log.info(s"stateMachine$mySequenceNumber will change its leader to $leader")
       if (currentLeader == self && leader != self && signalLeaderAliveSchedule != null)
         signalLeaderAliveSchedule.cancel()
 
@@ -127,7 +131,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
         monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, IsLeaderAlive)
 
     case SignalLeaderAlive =>
-      log.info(s"Statemachine-$mySequenceNumber sent alive signal")
+      log.info(s"stateMachine$mySequenceNumber sent alive signal")
       if (currentLeader == self)
         replicas.foreach(rep => rep ! LeaderKeepAlive)
       else if (signalLeaderAliveSchedule != null)
@@ -136,7 +140,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
     case LeaderKeepAlive => keepAlive = System.currentTimeMillis()
 
     case IsLeaderAlive =>
-      log.info(s"Statemachine-$mySequenceNumber monitors the leader $currentLeader (ignore null)")
+      log.info(s"stateMachine$mySequenceNumber monitors the leader $currentLeader (ignore null)")
       if (currentLeader != null && currentLeader != self && System.currentTimeMillis() > keepAlive + TTL) {
         monitorLeaderSchedule.cancel()
         myPromise = -1
@@ -145,17 +149,17 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
 
     case Prepare(n) =>
       Thread.sleep(Random.nextInt(1000))
-      log.info(s"Statemachine-$mySequenceNumber got prepare from $n")
+      log.info(s"stateMachine$mySequenceNumber got prepare from $n")
       if (n > myPromise) {
         myPromise = n
         sender() ! Prepare_OK(n, sqnOfAcceptedOp, acceptedOp)
-        log.info(s"Statemachine-$mySequenceNumber sends prepate_ok to $n")
+        log.info(s"stateMachine$mySequenceNumber sends prepate_ok to $n")
       }
       if (currentLeader == self && n > mySequenceNumber) {
         if (signalLeaderAliveSchedule != null)
           signalLeaderAliveSchedule.cancel()
         currentLeader = null
-        log.info(s"Statemachine-$mySequenceNumber detects leader with higher sqn. Now my currentLeader = null")
+        log.info(s"stateMachine$mySequenceNumber detects leader with higher sqn. Now my currentLeader = null")
       }
       if (n > mySequenceNumber && prepareTimeout != null)
         prepareTimeout.cancel()
@@ -164,11 +168,11 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
       Thread.sleep(Random.nextInt(1000))
       if (n == mySequenceNumber) {
         prepareAcks = (n, op) :: prepareAcks
-        log.info(s"Statemachine-$mySequenceNumber got prepare_ok")
+        log.info(s"stateMachine$mySequenceNumber got prepare_ok")
         if (prepareAcks.size >= majority) {
           if (prepareTimeout != null )
             prepareTimeout.cancel()
-          log.info(s"Statemachine-$mySequenceNumber got majority. I'm the leader now.")
+          log.info(s"stateMachine$mySequenceNumber got majority. I'm the leader now.")
           mySequenceNumber = 0
           replicas.foreach(rep => rep ! SetLeader(mySequenceNumber, self))
           /*if (currentLeader != null) {
@@ -183,7 +187,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
     case Timeout(step) =>
       val old = mySequenceNumber
       mySequenceNumber = mySequenceNumber + replicas.size
-      log.info(s"Statemachine-$old timed out! New sqn=$mySequenceNumber")
+      log.info(s"stateMachine$old timed out! New sqn=$mySequenceNumber")
       prepareAcks = List.empty[(Int,Operation)]
       numAcceptedAcks = 0
       step match {
