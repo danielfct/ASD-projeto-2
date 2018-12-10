@@ -18,13 +18,13 @@ final case class Prepare_OK(n: Int, acceptedN: Int, sqnOfAcceptedOp: Int)
 
 final case class SMPropose(op: Operation)
 
-final case class CopyState(replicas: Set[ActorSelection], serviceMap: Map[String,String])
+final case class CopyState(replicas: Set[ActorRef], serviceMap: Map[String,String])
 
 final case class Propose(N: Int, op: Operation)
 
-final case class Accept(N: Int, sqn: Int, op: Operation)
+final case class Accept(sqn: Int, N: Int, op: Operation)
 
-final case class Accept_OK(N: Int, sqn: Int)
+final case class Accept_OK(sqn: Int)
 
 final case class Decided(N: Int, op: Operation)
 
@@ -32,11 +32,21 @@ case object ExecuteOperations
 
 final case class Timeout(step: String)
 
-final case class AddReplica(rep: ActorSelection)
+final case class AddReplica(rep: ActorRef)
 
-final case class RemoveReplica(rep: ActorSelection)
+final case class RemoveReplica(rep: ActorRef)
 
 final case class SetPromise(Promise: Int)
+
+final case class SetState(sqn: Int, N: Int, op: Operation)
+
+final case class SetSequenceNumber(sqn: Int)
+
+final case class SetReplicas(replicas: Set[ActorRef])
+
+final case class Restart(sqn: Int)
+
+final case class Response(result: String)
 
 case object Debug
 

@@ -44,9 +44,9 @@ object StateMachine {
 }
 
 class Operation(var operationType: String)
-class ClientOperation(val oType: String, var key: String, var value: Option[String] = None)
+class ClientOperation(val oType: String, var key: String, var value: Option[String] = None, var reqid: Option[String] = None)
   extends Operation(oType)
-class ReplicaOperation(var oType: String, var replica: ActorSelection)
+class ReplicaOperation(var oType: String, var replica: ActorRef)
   extends Operation(oType)
 
 class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends Actor with ActorLogging {
@@ -72,7 +72,8 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   var leaderHeartbeatSchedule: Cancellable = _
   var prepareTimeout: Cancellable = _
 
-  var paxosInstances = Map.empty[Int, ActorRef]
+  var paxos = context.actorOf(Multipaxos.props(self, replicas, mySequenceNumber, myPromise), "multipaxos"+mySequenceNumber)
+  var resultsBackup = Map.empty[String,String]
 
   var leaderLastHeartbeat: Long = 0
   var TTL: Long = 10000 // leader sends heartbeats every 3 seconds
@@ -88,34 +89,23 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     replicas
   }
 
-  /*private def addClientOperation(operation: ClientOperation): Unit = {
+  private def addClientOperation(operation: ClientOperation): Unit = {
     serviceMap += (operation.key -> operation.value.get)
   }
 
-  private def addReplica(replica: ActorSelection): Unit = {
+  private def addReplica(replica: ActorRef): Unit = {
     replicas += replica
     majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-    paxosInstances.values.foreach(p => p ! AddReplica(replica))
+    paxos ! AddReplica(replica)
     if (currentLeader == self)
       replica ! CopyState(replicas, serviceMap)
   }
 
-  private def removeReplica(replica: ActorSelection): Unit = {
+  private def removeReplica(replica: ActorRef): Unit = {
     replicas -= replica
     majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-    paxosInstances.values.foreach(p => p ! RemoveReplica(replica))
+    paxos ! RemoveReplica(replica)
   }
-
-  private def getPaxosInstance(stateMachinePos: Int): ActorRef = {
-    var multipaxos = paxosInstances(stateMachinePos)
-    if (multipaxos == null) {
-      val multipaxosid = mySequenceNumber + 1 // TODO: pass unique sqn to multipaxos
-      multipaxos = context.actorOf(Multipaxos.props(self, replicas, multipaxosid, myPromise),
-        s"multipaxos-$multipaxosid-$stateMachinePos")
-      paxosInstances += stateMachinePos -> multipaxos
-    }
-    multipaxos
-  }*/
 
   private def overrideLeader(): Unit = {
     Thread.sleep(Random.nextInt(1000))
@@ -143,7 +133,6 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     println(s"  - AcceptedN: $acceptedN")
     println(s"  - AcceptedOp: $acceptedOp")
     println(s"  - PrepareAcks: $prepareAcks")
-    println(s"  - PaxosInstances: $paxosInstances")
     println(s"  - LeaderLastHeartbeat: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(leaderLastHeartbeat))}")
   }
 
@@ -152,6 +141,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     case Start(reps) =>
       replicas = reps
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
+      paxos ! SetReplicas(replicas)
       this.overrideLeader()
 
     case SetLeader(sqn, leader) =>
@@ -167,12 +157,15 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
         if (leader == self) { // self becomes leader
           leaderHeartbeatSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, SignalLeaderAlive)
           mySequenceNumber = 0
+          paxos ! SetSequenceNumber(mySequenceNumber)
         }
         else if (currentLeader == self) { // self is no longer leader
           mySequenceNumber = oldSqn
+          paxos ! SetSequenceNumber(mySequenceNumber)
         }
         currentLeader = leader
         myPromise = sqn
+        paxos ! SetPromise(myPromise)
         if (currentLeader != self) {
           monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, CheckLeaderAlive)
           leaderLastHeartbeat = System.currentTimeMillis()
@@ -210,17 +203,11 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       if (n > myPromise) {
         log.info(s"${self.path.name}.$mySequenceNumber sends prepare_ok to ${sender.path.name}.$n ($n > $myPromise)")
         myPromise = n
+        paxos ! SetPromise(myPromise)
         sender() ! Prepare_OK(n, acceptedN, sqnOfAcceptedOp)
       } else {
         log.info(s"${self.path.name}.$mySequenceNumber rejects prepare from ${sender.path.name}.$n ($n <= $myPromise)")
       }
-      /*if (currentLeader == self && n > mySequenceNumber) {
-        if (signalLeaderAliveSchedule != null)
-          signalLeaderAliveSchedule.cancel()
-        currentLeader = null
-        mySequenceNumber = oldSqn
-        log.info(s"stateMachine$mySequenceNumber detects leader with higher sqn. Now my currentLeader = null. Detected n = $n")
-      }*/
       if (n > mySequenceNumber && prepareTimeout != null)
         prepareTimeout.cancel()
 
@@ -241,31 +228,39 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     case Timeout(step) =>
       val old = mySequenceNumber
       mySequenceNumber = mySequenceNumber + replicas.size
+      paxos ! SetSequenceNumber(mySequenceNumber)
       oldSqn = mySequenceNumber
       log.info(s"${self.path.name}.$old timed out! New sqn=$mySequenceNumber")
       prepareAcks = List.empty[(Int,Int)]
       step match {
         case "PREPARE" =>
           this.overrideLeader()
-        case "PROPOSE"=> // TODO
         case _ => log.info(s"Unexpected timeout with step: $step")
       }
 
-    /*case SMPropose(operation) =>
-      val multipaxos = getPaxosInstance(currentN)
-      multipaxos ! Propose(currentN, operation)
-      currentN += 1
+    case SMPropose(operation) => {
+      var propose = true
+      if(operation.operationType.equals(StateMachine.PUT)) {
+        val op = operation.asInstanceOf[ClientOperation]
+        if (resultsBackup.contains(op.reqid.get)) {
+          sender ! Response(resultsBackup.get(op.reqid.get).get)
+          propose = false
+        }
+        else sender ! Response(serviceMap.get(op.key).get)
+      }
+      if (propose) 
+        paxos ! Propose(currentN, operation)
+    }
 
     case Decided(smPos, operation) =>
-      operationsToExecute += smPos -> operation
+      operationsToExecute += smPos -> operation 
+      currentN += 1
 
     case Accept(smPos, sqn, op) =>
-      val multipaxos = getPaxosInstance(currentN)
-      multipaxos ! Accept(smPos, sqn, op)
+      paxos ! Accept(smPos, sqn, op)
 
-    case Accept_OK(smPos, sqn) =>
-      val multipaxos = getPaxosInstance(currentN)
-      multipaxos ! Accept_OK(smPos, sqn)
+    case Accept_OK(sqn) =>
+      paxos ! Accept_OK(sqn)
 
     case ExecuteOperations =>
       var previous = -1
@@ -289,7 +284,15 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
 
     case CopyState(reps, smap) =>
       replicas = reps
-      serviceMap = smap*/
+      serviceMap = smap
+      
+    case SetState(sqn, smPos, op) => {
+      sqnOfAcceptedOp = sqn
+      acceptedN = smPos
+      acceptedOp = op
+    }
+    
+    case SetSequenceNumber(sqn) => mySequenceNumber = sqn
 
     case PrepareDebug =>
       if (monitorLeaderSchedule != null)
@@ -310,7 +313,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
         s"  - AcceptedN: $acceptedN\n" +
         s"  - AcceptedOp: $acceptedOp\n" +
         s"  - PrepareAcks: $prepareAcks\n" +
-        s"  - PaxosInstances: $paxosInstances\n" +
+        s"  - Paxos: $paxos\n" +
         s"  - LeaderLastHeartbeat: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(leaderLastHeartbeat))}\n")
   }
 
