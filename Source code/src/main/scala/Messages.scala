@@ -14,7 +14,7 @@ case object CheckLeaderAlive
 
 final case class Prepare(n: Int)
 
-final case class Prepare_OK(n: Int, acceptedN: Int, sqnOfAcceptedOp: Int)
+final case class Prepare_OK(n: Int, acceptedN: Int)
 
 final case class SMPropose(op: Operation)
 
@@ -24,7 +24,7 @@ final case class Propose(N: Int, op: Operation)
 
 final case class Accept(sqn: Int, N: Int, op: Operation)
 
-final case class Accept_OK(sqn: Int)
+final case class Accept_OK(sqn: Int, N: Int)
 
 final case class Decided(N: Int, op: Operation)
 
@@ -37,8 +37,6 @@ final case class AddReplica(rep: ActorRef)
 final case class RemoveReplica(rep: ActorRef)
 
 final case class SetPromise(Promise: Int)
-
-final case class SetState(sqn: Int, N: Int, op: Operation)
 
 final case class SetSequenceNumber(sqn: Int)
 

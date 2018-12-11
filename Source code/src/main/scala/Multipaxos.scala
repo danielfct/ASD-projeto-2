@@ -12,83 +12,88 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise:
   var replicas: Set[ActorRef] = reps
   var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
   var mySequenceNumber: Int = sqn
-  var currentProposedOp: Operation = _
-  var acceptedPos: Int = -1
-  var acceptedOperation: Operation = _
+  var currentOp: Operation = _
+  var currentSmPos: Int = -1
   var acceptedAcks: Int = 0
   var myPromise: Int = promise
-  var canPropose = false
-  var operationsToPropose = List.empty[(Int, Operation)]
+  var currentLeader: ActorRef = null
+  var accepted = false
 
   var acceptTimeout: Cancellable = _
   
-  context.system.scheduler.scheduleOnce(1 second) {
-    doPropose()
-  }
-    
-  def doPropose(): Unit = {
-    if (canPropose && operationsToPropose.nonEmpty) {
-      canPropose = false
-      val head = operationsToPropose.head
-      val smPos = head._1
-      val operation = head._2
-      currentProposedOp = operation
-      replicas.foreach(rep => rep ! Accept(mySequenceNumber, smPos, currentProposedOp))
-      acceptTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, Restart(mySequenceNumber))
-    }
-  }
+  private def isLeader(s: ActorRef, l: ActorRef): Boolean = 
+    s.path.parent.name.equals(l.path.name)
 
   override def receive: PartialFunction[Any, Unit] = {
 
-    case Propose(smPos: Int, op: Operation) => operationsToPropose = operationsToPropose :+ (smPos, op)
+    case Propose(smPos: Int, op: Operation) => {
+      log.info("multipaxos{} will propose N:{} op:{}. (myPromise={})", mySequenceNumber, smPos, op.operationType, myPromise)
+      currentSmPos = smPos
+      currentOp = op
+      replicas.foreach(rep => rep ! Accept(mySequenceNumber, smPos, op))
+      acceptTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, Restart(mySequenceNumber))    
+    }
       
     case Accept(sqn: Int, smPos: Int, op: Operation) =>
-      stateMachine ! LeaderHeartbeat
+      log.info("multipaxos{} got accept N:{} op:{}. (myPromise={})", mySequenceNumber, smPos, op.operationType, myPromise)
+      accepted = false
       // TODO: if i think im the leader -> I have to become a normal replica
-      if (sqn >= myPromise) {
-        acceptedPos = smPos
-        acceptedOperation = op
-        sender ! Accept_OK(sqn)
-        stateMachine ! SetState(sqn, smPos, op)
-      } // else sender ! Restart(sqn)
+      if (sqn >= myPromise || isLeader(sender,currentLeader)) {
+        log.info(s"multipaxos$mySequenceNumber accepted!")
+        currentSmPos = smPos
+        currentOp = op
+        sender ! Accept_OK(sqn, smPos)
+      } else {
+        //sender ! Restart(sqn)
+        log.info("multipaxos$mySequenceNumber rejected the accept sender={} leader={}!", sender.path.parent.name, currentLeader.path.name)
+      }
 
-    case Accept_OK(sqn: Int) =>
-      if (sqn == mySequenceNumber) {
+    case Accept_OK(sqn: Int, smPos: Int) =>
+      if (sqn == mySequenceNumber && smPos == currentSmPos && !accepted) {
         acceptedAcks += 1
         if (acceptedAcks >= majority) {
+          accepted = true
+          log.info("multipaxos{} got accept_ok from majority N:{}", mySequenceNumber, smPos)
           if (acceptTimeout != null)
             acceptTimeout.cancel()
-          replicas.foreach(rep => rep ! Decided(acceptedPos, acceptedOperation))
-          operationsToPropose = operationsToPropose.drop(1)
-          canPropose = true
+          replicas.foreach(rep => rep ! Decided(currentSmPos, currentOp))
         }
       }
 
     case Restart(sqn) => {
       if (sqn == mySequenceNumber) {
+        log.info(s"multipaxos$mySequenceNumber restarted!")
         acceptedAcks = 0
         mySequenceNumber = mySequenceNumber + replicas.size
         stateMachine ! SetSequenceNumber(mySequenceNumber)
-        canPropose = true
-        doPropose()
+        self ! Propose(currentSmPos, currentOp)
       }
     }     
 
     case AddReplica(rep) => 
+      log.info(s"multipaxos$mySequenceNumber added replica!")
       replicas += rep
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
 
     case RemoveReplica(rep) => 
+      log.info(s"multipaxos$mySequenceNumber removed replica!")
       replicas -= rep
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
 
-    case SetPromise(promise) => myPromise = promise
+    case SetPromise(promise) => 
+      myPromise = promise
+      log.info(s"multipaxos$mySequenceNumber changed promise to $promise!")
     
-    case SetSequenceNumber(sqn) => mySequenceNumber = sqn
-    
+    case SetSequenceNumber(sqn) => 
+      log.info(s"multipaxos$mySequenceNumber changed sqn to $sqn!")
+      mySequenceNumber = sqn
+          
     case SetReplicas(reps) => 
       replicas = reps
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
+      log.info(s"multipaxos$mySequenceNumber changed replicas set!")
+      
+    case SetLeader(_, leader) => currentLeader = leader
 
   }
 }
