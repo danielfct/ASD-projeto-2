@@ -36,11 +36,11 @@ Props(new StateMachine(sequenceNumber, replicasInfo))
 }*/
 
 object StateMachine {
-  def props(sequenceNumber: Int, replicasInfo: Array[String]): Props =
-    Props(new StateMachine(sequenceNumber, replicasInfo))
+  def props(sequenceNumber: Int, replicasInfo: Array[String], application: ActorRef): Props =
+    Props(new StateMachine(sequenceNumber, replicasInfo, application))
 }
 
-class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Actor with ActorLogging {
+class StateMachine(sequenceNumber: Int, replicasInfo: Array[String], application: ActorRef) extends Actor with ActorLogging {
   override def preStart(): Unit = log.info(s"\nstateMachine$sequenceNumber has started!")
   override def postStop(): Unit = log.info(s"\nstateMachine$sequenceNumber has stopped!")
 
@@ -63,12 +63,11 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
   var paxos: ActorRef = context.actorOf(Multipaxos.props(self, replicas, currentSequenceNum, myPromise), "multipaxos"+currentSequenceNum)
 
   var leaderLastHeartbeat: Long = 0
-  var TTL: Long = 6000 // leader sends heartbeats every 3 seconds
+  var LEADER_TTL: Long = 6000 // leader sends heartbeats every 3 seconds
 
   this.overrideLeader()
 
   def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
-    Thread.sleep(15000)
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
     for (i <- replicasInfo.indices) {
       val replicaInfo: String = replicasInfo(i)
@@ -80,9 +79,9 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
 
   private def write(key: String, value: String, requestId: String): Unit = {
     log.info(s"\nExecuted write: key=$key value=$value")
-    val appInfo: Array[String] = requestId.split(":")
-    val app = context.actorSelection(s"akka.tcp://${appInfo(0)}")
-    app ! WriteResponse(WriteOperation(key, value, requestId))
+/*    val appInfo: Array[String] = requestId.split(":")
+    val app = context.actorSelection(s"akka.tcp://${appInfo(0)}")*/
+    application ! WriteResponse(WriteOperation(key, value, requestId))
   }
 
   private def addReplica(replica: ActorRef): Unit = {
@@ -204,7 +203,7 @@ class StateMachine(sequenceNumber: Int, replicasInfo: Array[String]) extends Act
     case CheckLeaderAlive =>
       if (currentLeader != null) {
         log.info(s"\n${self.path.name} checking health of leader ${currentLeader.path.name}")
-        if (System.currentTimeMillis() > leaderLastHeartbeat + TTL) {
+        if (System.currentTimeMillis() > leaderLastHeartbeat + LEADER_TTL) {
           monitorLeaderSchedule.cancel()
           oldLeader = currentLeader
           currentLeader = null
