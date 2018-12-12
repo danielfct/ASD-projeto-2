@@ -293,7 +293,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       self ! ExecuteOperations
       currentN += 1
 
-    case msg @ Accept(smPos, sqn, op) =>
+    case msg @ Accept(sqn, smPos, op) =>
       paxos forward msg
 
     case msg @ Accept_OK(sqn, smPos) =>

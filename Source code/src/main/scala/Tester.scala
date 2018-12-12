@@ -15,16 +15,16 @@ object Tester extends App {
   }
 
   //TEST FOR LEADER ELECTION AND RE-ELECTION
-  actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
+  /*actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
   Thread.sleep(15000)
   actors.values.foreach(a => a ! Debug)
   actors(5) ! PoisonPill
   Thread.sleep(30000)
   actors.values.foreach(a => a ! Debug)
-  actors.values.foreach(a => a ! PoisonPill)
+  actors.values.foreach(a => a ! PoisonPill)*/
   
   // TEST FOR PUTS AND GETS
-  /*actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
+  actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
   Thread.sleep(15000)
   actors.values.foreach(a => a ! Debug)
   implicit val timeout = AkkaTimeout(5 seconds)
@@ -85,7 +85,7 @@ object Tester extends App {
   
   future = actors(3) ? Get(5,"e")
   result = Await.result(future, timeout.duration).asInstanceOf[Response].result
-  println("Result of Get(e) from rep3 is " + result)*/
+  println("Result of Get(e) from rep3 is " + result)
 
   system.terminate()
 }
