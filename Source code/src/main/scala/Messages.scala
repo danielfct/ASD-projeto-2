@@ -44,7 +44,11 @@ final case class SetReplicas(replicas: Set[ActorRef])
 
 final case class Restart(sqn: Int)
 
-final case class Response(result: String)
+final case class Response(reqid: Long, result: String)
+
+final case class Put(id: Long, key: String, value: String)
+
+final case class Get(id: Long, key: String)
 
 case object Debug
 

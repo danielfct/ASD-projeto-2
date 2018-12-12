@@ -44,7 +44,7 @@ object StateMachine {
 }
 
 class Operation(var operationType: String)
-class ClientOperation(val oType: String, var key: String, var value: Option[String] = None, var reqid: Option[String] = None)
+class ClientOperation(val oType: String, var key: String, var value: Option[String] = None, var reqid: Long)
   extends Operation(oType)
 class ReplicaOperation(var oType: String, var replica: ActorRef)
   extends Operation(oType)
@@ -69,9 +69,10 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   var monitorLeaderSchedule: Cancellable = _
   var leaderHeartbeatSchedule: Cancellable = _
   var prepareTimeout: Cancellable = _
+  var getKeySchedule: Cancellable = _
 
   var paxos = context.actorOf(Multipaxos.props(self, replicas, mySequenceNumber, myPromise), "multipaxos"+mySequenceNumber)
-  var resultsBackup = Map.empty[String,String]
+  var resultsBackup = Map.empty[Long,String]
 
   var leaderLastHeartbeat: Long = 0
   var TTL: Long = 6000 // leader sends heartbeats every 3 seconds
@@ -90,6 +91,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   private def addClientOperation(operation: ClientOperation): Unit = {
     log.info("execute operation added a new client op with type: {}, key: {}, value: {}", operation.oType, operation.key, operation.value)
     serviceMap += (operation.key -> operation.value.get)
+    resultsBackup += (operation.reqid -> operation.value.get)
   }
 
   private def addReplica(replica: ActorRef): Unit = {
@@ -246,16 +248,32 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
           this.overrideLeader()
         case _ => log.info(s"Unexpected timeout with step: $step")
       }
+      
+    case msg @ Put(id, key, value) => {
+      if (currentLeader == self) {
+        self ! SMPropose(new ClientOperation(StateMachine.PUT, key, Some(value), id))
+        sender ! Response(id,serviceMap.get(key).getOrElse("empty"))
+      } else currentLeader forward msg
+    }
+    
+    case Get(id, key) => {
+      //if (serviceMap.contains(key)) {
+        sender ! Response(id, serviceMap.get(key).getOrElse("empty"))
+        //if (getKeySchedule != null) 
+          //getKeySchedule.cancel()
+      //} else getKeySchedule = context.system.scheduler.scheduleOnce(2 seconds, self, Get(key))  
+    }
 
     case SMPropose(operation) => {
       var propose = true
       if(operation.operationType.equals(StateMachine.PUT)) {
         val op = operation.asInstanceOf[ClientOperation]
-        if (resultsBackup.contains(op.reqid.get)) {
-          sender ! Response(resultsBackup.get(op.reqid.get).get)
+        val reqid = op.reqid
+        if (resultsBackup.contains(reqid)) {
+          log.info("Repeated operation detected! reqid={}, key={}, value={}", reqid, op.key, op.value.getOrElse("empty"))
+          sender ! Response(reqid, resultsBackup.get(reqid).get)
           propose = false
-        }
-        else sender ! Response(serviceMap.get(op.key).get)
+        } else sender ! Response(reqid, serviceMap.get(op.key).getOrElse("empty"))
       }
       if (propose) 
         paxos ! Propose(currentN, operation)
