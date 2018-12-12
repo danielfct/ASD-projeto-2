@@ -1,6 +1,8 @@
+package pt.unl.fct
+
 import com.typesafe.config.{Config, ConfigFactory}
 
-object Configuration {
+package object asd {
   def buildConfiguration(hostname: String, port: String): Config = {
     ConfigFactory.load(ConfigFactory.parseString(s"""
     akka {
