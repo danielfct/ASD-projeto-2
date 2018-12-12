@@ -2,6 +2,8 @@ import akka.actor.{ActorRef, ActorSelection}
 
 final case class Start(initialReplicas: Set[ActorRef])
 
+final case class Join(contactNode: ActorRef)
+
 case object TryToElectMeAsLeader
 
 final case class SetLeader(sqn: Int, leader: ActorRef)

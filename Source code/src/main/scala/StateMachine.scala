@@ -143,6 +143,8 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
       paxos ! SetReplicas(replicas)
       this.overrideLeader()
+      
+    case Join(contactNode) => contactNode ! AddReplica(self)
 
     case SetLeader(sqn, leader) =>
       Thread.sleep(Random.nextInt(1000))
@@ -262,6 +264,12 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
         //if (getKeySchedule != null) 
           //getKeySchedule.cancel()
       //} else getKeySchedule = context.system.scheduler.scheduleOnce(2 seconds, self, Get(key))  
+    }
+    
+    case msg @ AddReplica(rep) => {
+      if (currentLeader == self)
+        self ! SMPropose(new ReplicaOperation(StateMachine.ADD_REPLICA, rep))
+      else currentLeader forward msg
     }
 
     case SMPropose(operation) => {
