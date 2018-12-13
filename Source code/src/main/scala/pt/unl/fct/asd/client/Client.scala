@@ -36,10 +36,10 @@ object Client extends App {
     Props(new Client(numberOfOperations, replicasInfo))
 }
 
-class Client(val numberOfOperations: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
+class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
 
-  var requests: Map[OperationInfo, Operation] = Map.empty[OperationInfo, Operation]
   val replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
+  var requests: Map[OperationInfo, Operation] = Map.empty[OperationInfo, Operation]
   var lastOperation: Operation = _
   var startTime: Long = -1L
   var numberOfReads: Int = 0
@@ -57,23 +57,14 @@ class Client(val numberOfOperations: Int, val replicasInfo: Array[String]) exten
     }
     log.info(s"\nInitial replicas: $replicas")
 
-    val t = System.currentTimeMillis()
-    requests += OperationInfo(t, -1L) -> ReadOperation("a", "a")
-    println(requests)
-    requests.filterKeys(k => k.equals(OperationInfo(t, -1)))
-    println(requests)
-    requests += OperationInfo(t, 1L) -> ReadOperation("a", "a")
-    println(requests)
-
-
     replicas
   }
 
   private def randomOperation(): Operation = {
     val requestId: String = System.currentTimeMillis().toString
-    val randomKey: String = r.nextInt(1).toString
+    val randomKey: String = r.nextInt(10).toString
     if (r.nextInt(2) == 0) {
-      val randomValue: String = r.nextInt(1).toString
+      val randomValue: String = r.nextInt(10).toString
       WriteOperation(randomKey, randomValue, requestId)
     } else {
       ReadOperation(randomKey, requestId)
@@ -118,13 +109,12 @@ class Client(val numberOfOperations: Int, val replicasInfo: Array[String]) exten
   }
 
   private def processResponse(): Unit = {
-    requestTimeoutSchedule.cancel()
     lastOperation match {
       case ReadOperation(_, requestId: String) =>
-        requests.filterKeys(k => k.equals(OperationInfo(requestId.toLong, -1)))
+        requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
         requests += OperationInfo(requestId.toLong, System.currentTimeMillis()) -> lastOperation
       case WriteOperation(_, _, requestId: String) =>
-        requests.filterKeys(k => k.equals(OperationInfo(requestId.toLong, -1)))
+        requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
         requests += OperationInfo(requestId.toLong, System.currentTimeMillis()) -> lastOperation
     }
   }
@@ -140,6 +130,8 @@ class Client(val numberOfOperations: Int, val replicasInfo: Array[String]) exten
       s"End time: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(endTime))}\n" +
       s"Duration: ${duration/1000} seconds\n" +
       s"Requests: $requests\n" +
+      s"Number of reads: $numberOfReads\n" +
+      s"Number of writes: $numberOfWrites\n" +
       s"Number of timeouts: $numberOfTimeouts\n")
   }
 
@@ -154,9 +146,11 @@ class Client(val numberOfOperations: Int, val replicasInfo: Array[String]) exten
       this.sendOperation()
 
     case Response(result: Option[String]) =>
-      log.info(s"\nGot response value=$result")
+      log.info(s"\nGot response value=$result $numberOfOperations")
+      requestTimeoutSchedule.cancel()
+      numberOfOperations -= 1
       this.processResponse()
-      if (requests.size < numberOfOperations) {
+      if (numberOfOperations > 0) {
         this.sendOperation()
       } else {
         this.end()

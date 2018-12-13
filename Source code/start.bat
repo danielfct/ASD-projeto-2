@@ -3,7 +3,7 @@ echo off
 set /p clientsNr="Number of clients? "
 set /p operationsNr="Number of operations? "
 set /p replicasNr="Number of replicas? "
-set /p multiple="Multiple consoles? "
+set /p multiple="Multiple consoles (yes/no)? "
 
 setlocal enabledelayedexpansion
 

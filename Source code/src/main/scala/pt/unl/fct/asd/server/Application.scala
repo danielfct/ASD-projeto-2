@@ -77,11 +77,12 @@ class Application(replicasInfo: Array[String]) extends Actor with ActorLogging {
       val clientInfo: Array[String] = operation.requestId.split("_")
       val client = context.actorSelection(s"${clientInfo(0)}")
       if (clientInfo(1).toLong > System.currentTimeMillis()) {
-        clientWrites.filterKeys(k => k.contains(clientInfo(0)))
+        clientWrites = clientWrites.filterKeys(k => !k.contains(clientInfo(0)))
         clientWrites += (operation.requestId -> operation.value)
       }
       keyValueStore += (operation.key -> operation.value)
-      client ! Response(result)
+      // TODO if current is leader
+        client ! Response(result)
   }
 
 }
