@@ -30,13 +30,13 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise:
       log.info("multipaxos{} will propose N:{} op:{}. (myPromise={})", mySequenceNumber, smPos, op.operationType, myPromise)
       currentSmPos = smPos
       currentOp = op
+      accepted = false
       replicas.foreach(rep => rep ! Accept(mySequenceNumber, smPos, op))
       acceptTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, Restart(mySequenceNumber))    
     }
       
     case Accept(sqn: Int, smPos: Int, op: Operation) =>
       log.info("multipaxos{} got accept N:{} op:{}. (myPromise={})", mySequenceNumber, smPos, op.operationType, myPromise)
-      accepted = false
       // TODO: if i think im the leader -> I have to become a normal replica
       if (sqn >= myPromise || isLeader(sender,currentLeader)) {
         log.info(s"multipaxos$mySequenceNumber accepted!")

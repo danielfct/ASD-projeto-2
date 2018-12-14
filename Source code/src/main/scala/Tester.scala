@@ -24,7 +24,7 @@ object Tester extends App {
   actors.values.foreach(a => a ! PoisonPill)*/
   
   // TEST FOR PUTS AND GETS
-  actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
+  /*actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
   Thread.sleep(15000)
   actors.values.foreach(a => a ! Debug)
   implicit val timeout = AkkaTimeout(5 seconds)
@@ -85,7 +85,65 @@ object Tester extends App {
   
   future = actors(3) ? Get(5,"e")
   result = Await.result(future, timeout.duration).asInstanceOf[Response].result
-  println("Result of Get(e) from rep3 is " + result)
+  println("Result of Get(e) from rep3 is " + result)*/
+  
+  //TEST FOR ADD_REPLICA AND COPY_STATE
+  actors.keySet.foreach(k => actors(k) ! Start(actors.values.toSet))
+  Thread.sleep(15000)
+  actors.values.foreach(a => a ! Debug)
+  implicit val timeout = AkkaTimeout(5 seconds)
+  var future = actors(5) ? Put(1,"a","b")
+  var result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Put(1,a,b) is " + result)
+  
+  Thread.sleep(10000)
+  
+  future = actors(5) ? Put(2,"c","d")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Put(2,c,d) is " + result)
+  
+    Thread.sleep(10000)
+  
+  future = actors(5) ? Put(3,"e","f")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Put(3,e,f) is " + result)
+  
+  Thread.sleep(10000)
+  
+  actors += 6 -> system.actorOf(StateMachine.props(6), "stateMachine"+6)
+  actors(6) ! Join(actors(5))
+  
+  Thread.sleep(15000)
+  
+  actors.values.foreach(a => a ! Debug)
+  future = actors(6) ? Get(1,"a")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Get(a) from rep6 is " + result)
+  future = actors(6) ? Get(2,"c")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Get(c) from rep6 is " + result)
+  future = actors(6) ? Get(3,"e")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Get(e) from rep6 is " + result)
+  
+  future = actors(6) ? Put(4,"g","h")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Put(2,c,d) is " + result)
+  
+  Thread.sleep(10000)
+  
+  future = actors(3) ? Get(4,"g")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Get(g) from rep3 is " + result)
+  
+  println("Testing check of repeated operations...")
+  
+  future = actors(6) ? Put(2,"c","d")
+  result = Await.result(future, timeout.duration).asInstanceOf[Response].result
+  println("Result of Put(2,c,d) is " + result)
+  
+  actors.values.foreach(a => a ! Debug)
+  actors.values.foreach(a => a ! PoisonPill)
 
   system.terminate()
 }

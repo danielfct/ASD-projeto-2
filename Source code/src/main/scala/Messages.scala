@@ -1,4 +1,5 @@
 import akka.actor.{ActorRef, ActorSelection}
+import scala.collection.SortedMap
 
 final case class Start(initialReplicas: Set[ActorRef])
 
@@ -20,7 +21,7 @@ final case class Prepare_OK(n: Int, acceptedN: Int)
 
 final case class SMPropose(op: Operation)
 
-final case class CopyState(replicas: Set[ActorRef], serviceMap: Map[String,String])
+final case class CopyState(replicas: Set[ActorRef], operationsToExecute: SortedMap[Int,Operation], promise: Int, smPos: Int)
 
 final case class Propose(N: Int, op: Operation)
 
