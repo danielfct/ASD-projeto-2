@@ -111,6 +111,10 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     log.info(s"execute operation removed a replica: $replica")
     replicas -= replica
     majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
+    if (replica == self) {
+      if (monitorLeaderSchedule != null) monitorLeaderSchedule.cancel()
+      self ! Join(currentLeader)
+    }
     paxos ! RemoveReplica(replica)
   }
 
