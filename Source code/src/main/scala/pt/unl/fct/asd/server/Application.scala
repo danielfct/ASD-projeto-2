@@ -18,10 +18,10 @@ object Application extends App {
     println("Usage: \"sbt runMain Application sequenceNumber ip port replica1 [replica2, ...]\"")
     System.exit(1)
   }
-  val sequenceNumber = args(0).toInt
-  val hostname = args(1)
-  val port = args(2)
-  val replicasInfo = args.drop(3)
+  val sequenceNumber: Int = args(0).toInt
+  val hostname: String = args(1)
+  val port: Int = args(2).toInt
+  val replicasInfo: Array[String] = args.drop(3)
   val config: Config = buildConfiguration(hostname, port)
 
   implicit val system: ActorSystem = ActorSystem("Server", config)
@@ -41,17 +41,17 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
   val r = new Random
 
   private def logInfo(msg: String): Unit = {
-    log.info(s"\nApplication layer: $msg")
+    log.info(s"\n${self.path.name}: $msg")
   }
 
   override def receive(): PartialFunction[Any, Unit] = {
 
     case Read(key: String) =>
-      this.logInfo(s"read key=$key value=${keyValueStore.get(key)}")
+      this.logInfo(s"Read key=$key value=${keyValueStore.get(key)}")
       sender ! Response(result = keyValueStore.get(key))
 
     case Write(key: String, value: String, timestamp: Long) =>
-      this.logInfo(s"write key=$key timestamp=$timestamp")
+      this.logInfo(s"Write key=$key timestamp=$timestamp")
       val requestId: String = s"${sender.path}_$timestamp"
       if (clientWrites.contains(requestId)) {
         sender ! Response(result = clientWrites.get(requestId))
@@ -65,7 +65,7 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
       }
 
     case WriteResponse(operation: WriteOperation) =>
-      this.logInfo(s"got write response $operation")
+      this.logInfo(s"Got write response $operation")
       val key: String = operation.key
       val value: String = operation.value
       val requestId: String = operation.requestId
@@ -75,17 +75,17 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
       clientWrites += (requestId -> value)
       keyValueStore += (key -> value)
       if (pendingWrites.contains(requestId)) {
-        this.logInfo(s"replying to the client $operation")
+        this.logInfo(s"Replying to the client $operation")
         pendingWrites -= requestId
         val client = context.actorSelection(s"${clientInfo(0)}")
         client ! Response(result)
       }
       else {
-        this.logInfo(s"not replying to the client $operation")
+        this.logInfo(s"Not replying to the client $operation")
       }
 
     case UpdateLeader(newLeader) =>
-      this.logInfo(s"update leader $newLeader")
+      this.logInfo(s"Update leader $newLeader")
       leader = newLeader
   }
 

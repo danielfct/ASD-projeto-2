@@ -3,7 +3,7 @@ package pt.unl.fct
 import com.typesafe.config.{Config, ConfigFactory}
 
 package object asd {
-  def buildConfiguration(hostname: String, port: String): Config = {
+  def buildConfiguration(hostname: String, port: Int): Config = {
     ConfigFactory.load(ConfigFactory.parseString(s"""
     akka {
       loglevel = "INFO"

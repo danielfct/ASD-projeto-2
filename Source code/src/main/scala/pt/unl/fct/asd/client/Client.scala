@@ -15,45 +15,45 @@ import ExecutionContext.Implicits.global
 import scala.util.Random
 
 object Client extends App {
-  if (args.length < 4) {
-    println("Usage: \"sbt runMain Client numberOfClients numberOfOperations ip port replica1 replica2 replica3 [replica4, ...]\"")
+  if (args.length < 6) {
+    println("Usage: \"sbt runMain Client initialDelay numberOfClients numberOfOperations ip port replica1 [replica2, ...]\"")
     System.exit(1)
   }
-  val numberOfClients = args(0).toInt
-  val numberOfOperations = args(1).toInt
-  val hostname = args(2)
-  val port = args(3)
-  val replicasInfo = args.drop(4)
+  val initialDelay: Long = args(0).toLong
+  val numberOfClients: Int = args(1).toInt
+  val numberOfOperations: Int = args(2).toInt
+  val hostname: String = args(3)
+  val port: Int = args(4).toInt
+  val replicasInfo: Array[String] = args.drop(5)
   val config: Config = buildConfiguration(hostname, port)
 
   implicit val system: ActorSystem = ActorSystem("Client", config)
   for (i <- 1 to numberOfClients) {
-    val client = system.actorOf(Client.props(numberOfOperations, replicasInfo), s"client$i")
+    val client = system.actorOf(Client.props(initialDelay, numberOfOperations, replicasInfo), s"client$i")
     client ! "START"
   }
 
-  def props(numberOfOperations: Int, replicasInfo: Array[String]): Props =
-    Props(new Client(numberOfOperations, replicasInfo))
+  def props(initialDelay: Long, numberOfOperations: Int, replicasInfo: Array[String]): Props =
+    Props(new Client(initialDelay, numberOfOperations, replicasInfo))
 }
 
-class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
+class Client(val initialDelay: Long, var numberOfOperations: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
 
   val replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
-  var leader: ActorRef = _
   var requests: Map[OperationInfo, Operation] = Map.empty[OperationInfo, Operation]
   var lastOperation: Operation = _
   var startTime: Long = -1L
   var numberOfReads: Int = 0
   var numberOfWrites: Int = 0
   var numberOfTimeouts: Int = 0
-  val OPERATION_TIMEOUT: Int = 5000
+  val OPERATION_TIMEOUT: Int = 10000
   var operationTimeoutSchedule: Cancellable = _
   val r = new Random
 
   def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
     replicasInfo.foreach(replica => replicas += context.actorSelection(s"akka.tcp://Server@$replica"))
-    log.info(s"\nInitial replicas: $replicas")
+    this.logInfo(s"\nInitial replicas: $replicas")
     replicas
   }
 
@@ -105,7 +105,6 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
   }
 
   private def processResponse(): Unit = {
-    Thread.sleep(1000)
     lastOperation match {
       case ReadOperation(_, requestId: String) =>
         requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
@@ -113,7 +112,6 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
       case WriteOperation(_, _, requestId: String) =>
         requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
         requests += OperationInfo(requestId.toLong, System.currentTimeMillis()) -> lastOperation
-        leader = sender
     }
   }
 
@@ -123,14 +121,41 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
 
   private def printStats(): Unit = {
     val endTime: Long = System.currentTimeMillis()
-    val duration: Long = endTime - startTime
-    log.info(s"\nStart time: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(startTime))}\n" +
+    val durationMillis: Long = endTime - startTime
+    val durationSeconds: Float = if (durationMillis == 0) 0 else durationMillis/1000f
+    var totalReadsLatency: Int = 0
+    var totalWritesLatency: Int = 0
+    var totalLatency: Int = 0
+    for ((operationInfo, operation) <- requests) {
+      val latency: Int = (operationInfo.responseTimestamp - operationInfo.sendTimestamp).toInt
+      totalLatency += latency
+      operation match {
+        case ReadOperation(_, _) =>
+          totalReadsLatency += latency
+        case WriteOperation(_, _, _) =>
+          totalWritesLatency += latency
+        case _ =>
+          this.logInfo(s"Client executed unexpected operation $operation")
+      }
+    }
+    val requestsPerSecond: Float = if (durationMillis == 0) 0 else requests.size/durationSeconds
+    this.logInfo(s"\n" +
+      s"Start time: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(startTime))}\n" +
       s"End time: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(endTime))}\n" +
-      s"Duration: ${duration/1000} seconds\n" +
-      s"Requests: $requests\n" +
+      s"Duration: $durationMillis milliseconds ($durationSeconds seconds)\n" +
+      s"Reads average latency: ${totalReadsLatency/numberOfReads} milliseconds\n" +
+      s"Writes average latency: ${totalWritesLatency/numberOfWrites} milliseconds\n" +
+      s"Average latency: ${totalLatency/requests.size} milliseconds\n" +
+      s"Speed of requests: $requestsPerSecond per second\n" +
+      s"Number of requests: ${requests.size}\n" +
       s"Number of reads: $numberOfReads\n" +
       s"Number of writes: $numberOfWrites\n" +
-      s"Number of timeouts: $numberOfTimeouts\n")
+      s"Number of timeouts: $numberOfTimeouts\n" +
+      s"Requests: $requests\n")
+  }
+
+  private def logInfo(msg: String): Unit = {
+    log.info(s"\n${self.path.name}: $msg")
   }
 
   override def receive: Receive = {
@@ -140,6 +165,8 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
       latency and throughput of replicas failing or joining the system).*/
 
     case "START" =>
+      this.logInfo(s"Sleeping for $initialDelay milliseconds")
+      Thread.sleep(initialDelay)
       startTime = System.currentTimeMillis()
       if (numberOfOperations > 0) {
         this.sendOperation()
@@ -148,10 +175,10 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
       }
 
     case Response(result: Option[String]) =>
-      log.info(s"\nGot response value=$result\nOperations left: ${numberOfOperations-1}")
+      this.logInfo(s"Got response value=$result \nOperations left: ${numberOfOperations-1}")
       operationTimeoutSchedule.cancel()
-      numberOfOperations -= 1
       this.processResponse()
+      numberOfOperations -= 1
       if (numberOfOperations > 0) {
         this.sendOperation()
       } else {
@@ -159,7 +186,7 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
       }
 
     case OperationTimeout(operation: Operation) =>
-      log.info(s"\nTimeout $operation")
+      this.logInfo(s"Timeout $operation")
       numberOfTimeouts += 1
       operation match {
         case ReadOperation(key: String, _) =>

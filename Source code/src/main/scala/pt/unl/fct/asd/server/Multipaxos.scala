@@ -19,34 +19,36 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
   var acceptedAcks: Int = 0
   var leader: ActorRef = _
   var accepted = false
-
   var acceptTimeout: Cancellable = _
 
   private def isLeader(sender: ActorRef): Boolean =
     sender.path.name.equals(leader.path.name)
 
+  private def logInfo(msg: String): Unit = {
+    log.info(s"\n${self.path.name}-$sequenceNumber: $msg")
+  }
+
   override def receive: PartialFunction[Any, Unit] = {
 
-    case Propose(smPos: Int, op: Operation) => {
-      log.info(s"\nmultipaxos$sequenceNumber will propose N:$smPos op:$op (myPromise=$promise)")
+    case Propose(smPos: Int, operation: Operation) => {
+      this.logInfo(s"Proposing $operation for position $smPos")
       currentSmPos = smPos
-      currentOp = op
-      replicas.foreach(rep => rep ! Accept(sequenceNumber, smPos, op))
+      currentOp = operation
+      replicas.foreach(rep => rep ! Accept(sequenceNumber, smPos, operation))
       acceptTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, Restart(sequenceNumber))
     }
 
-    case Accept(sqn: Int, smPos: Int, op: Operation) =>
-      log.info(s"\nmultipaxos$sequenceNumber got accept N:$smPos op:$op (myPromise=$promise)")
+    case Accept(sqn: Int, smPos: Int, operation: Operation) =>
+      this.logInfo(s"Got accept request from $sender with sequenceNumber $sqn to position $smPos")
       accepted = false
       // TODO: if i think im the leader -> I have to become a normal replica
       if (sqn >= promise || isLeader(sender)) {
-        log.info(s"\nmultipaxos$sequenceNumber accepted!")
+        this.logInfo(s"Accepted operation $operation for position $smPos")
         currentSmPos = smPos
-        currentOp = op
+        currentOp = operation
         sender ! Accept_OK(sqn, smPos)
       } else {
-        //sender ! Restart(sqn)
-        log.info("multipaxos$mySequenceNumber rejected the accept sender={} leader={}!", sender.path.parent.name, leader.path.name)
+        this.logInfo(s"Rejected operation $operation from $sender. Promise is $promise, SequenceNumber is $sqn and leader is $leader")
       }
 
     case Accept_OK(sqn: Int, smPos: Int) =>
@@ -54,7 +56,7 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
         acceptedAcks += 1
         if (acceptedAcks >= majority) {
           accepted = true
-          log.info("multipaxos{} got accept_ok from majority N:{}", sequenceNumber, smPos)
+          this.logInfo(s"Got accept_ok from majority for position $smPos")
           if (acceptTimeout != null)
             acceptTimeout.cancel()
           replicas.foreach(rep => rep ! Decided(currentSmPos, currentOp))
@@ -63,7 +65,7 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
 
     case Restart(sqn) => {
       if (sqn == sequenceNumber) {
-        log.info(s"\nmultipaxos$sequenceNumber restarted!")
+        this.logInfo(s"Restarted")
         acceptedAcks = 0
         sequenceNumber = sequenceNumber + replicas.size
         stateMachine ! SetSequenceNumber(sequenceNumber)
@@ -71,31 +73,26 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
       }
     }
 
-    case AddReplica(rep) =>
-      log.info(s"\nmultipaxos$sequenceNumber added replica!")
-      replicas += rep
+    case AddReplica(replica) =>
+      this.logInfo(s"Added replica $replica")
+      replicas += replica
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
 
-    case RemoveReplica(rep) =>
-      log.info(s"\nmultipaxos$sequenceNumber removed replica!")
-      replicas -= rep
+    case RemoveReplica(replica) =>
+      this.logInfo(s"Removed replica $replica")
+      replicas -= replica
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
 
     case SetPromise(newPromise) =>
       promise = newPromise
-      log.info(s"\nmultipaxos$sequenceNumber changed promise to $promise!")
+      this.logInfo(s"Changed promise to $promise")
 
     case SetSequenceNumber(sqn) =>
-      log.info(s"\nmultipaxos$sequenceNumber changed sqn to $sqn!")
+      this.logInfo(s"Changed sequenceNumber to $sqn!")
       sequenceNumber = sqn
 
-    /*case SetReplicas(reps) =>
-      replicas = reps
-      majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-      log.info(s"\nmultipaxos$sequenceNumber changed replicas set!")*/
-
     case UpdateLeader(newLeader) =>
-      log.info(s"\nMultipaxos layer: update leader $newLeader")
+      this.logInfo(s"Update leader $newLeader")
       leader = newLeader
 
   }
