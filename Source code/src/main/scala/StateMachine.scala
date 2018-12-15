@@ -292,9 +292,14 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       
     case msg @ Put(id, key, value) => {
       if (currentLeader == self) {
-        val operation = new ClientOperation(StateMachine.PUT, key, Some(value), id)
-        operationsWaiting += id -> operation
-        sender ! Response(id,serviceMap.get(key).getOrElse("empty"))
+        if (resultsBackup.contains(id)) {
+          log.info("Repeated operation detected! reqid={}, key={}, value={}", id, key, value)
+          sender ! Response(id, resultsBackup.get(id).get)
+          } else {
+            sender ! Response(id, serviceMap.get(key).getOrElse("empty"))
+            val operation = new ClientOperation(StateMachine.PUT, key, Some(value), id)
+            operationsWaiting += id -> operation
+          }
       } else currentLeader forward msg
     }
     
@@ -313,25 +318,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     }
     
     case SMPropose(operations) => {
-      var toPropose = List.empty[Operation]
-      operations.foreach(operation => {
-        var propose = true
-        if(operation.operationType.equals(StateMachine.PUT)) {
-          val op = operation.asInstanceOf[ClientOperation]
-          val reqid = op.reqid
-          if (resultsBackup.contains(reqid)) {
-            log.info("Repeated operation detected! reqid={}, key={}, value={}", reqid, op.key, op.value.getOrElse("empty"))
-            sender ! Response(reqid, resultsBackup.get(reqid).get)
-            propose = false
-          } else sender ! Response(reqid, serviceMap.get(op.key).getOrElse("empty"))
-        }
-        if (propose) {
-          log.info(s"stateMachine$mySequenceNumber will send propose($currentN,$operation)")
-          toPropose = toPropose :+ operation
-        }
-      })
-      if (toPropose.nonEmpty)
-        paxos ! Propose(currentN, toPropose)
+      paxos ! Propose(currentN, operations)
     }
 
     case Decided(smPos, operations) =>
@@ -395,6 +382,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       log.info(s"\nDebug for ${self.path.name}:\n" +
         s"  - OperationsToExecute: $operationsToExecute\n" +
         s"  - ServiceMap: $serviceMap\n" +
+        s"  - ResultsBackup: $resultsBackup\n" +
         s"  - CurrentN: $currentN\n" +
         s"  - OldSqn: $oldSqn\n" +
         s"  - MySequenceNumber: $mySequenceNumber\n" +

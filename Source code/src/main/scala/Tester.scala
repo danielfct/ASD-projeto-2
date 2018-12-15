@@ -96,13 +96,10 @@ object Tester extends App {
   var result = Await.result(future, timeout.duration).asInstanceOf[Response].result
   println("Result of Put(1,a,b) is " + result)
   
-  Thread.sleep(10000)
-  
   future = actors(5) ? Put(2,"c","d")
   result = Await.result(future, timeout.duration).asInstanceOf[Response].result
   println("Result of Put(2,c,d) is " + result)
   
-    Thread.sleep(10000)
   
   future = actors(5) ? Put(3,"e","f")
   result = Await.result(future, timeout.duration).asInstanceOf[Response].result
