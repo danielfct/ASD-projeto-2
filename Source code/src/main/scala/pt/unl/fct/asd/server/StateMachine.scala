@@ -9,6 +9,7 @@ import akka.util.Timeout
 import com.typesafe.config.Config
 
 import scala.collection.SortedMap
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
@@ -17,253 +18,174 @@ import scala.util.Random
 import scala.util.control.Breaks._
 
 object StateMachine {
-  def props(sequenceNumber: Int, replicasInfo: Array[String], application: ActorRef): Props =
-    Props(new StateMachine(sequenceNumber, replicasInfo, application))
+  def props(application: ActorRef, sequenceNumber: Int, replicasInfo: Array[String]): Props =
+    Props(new StateMachine(application, sequenceNumber, replicasInfo))
 }
 
-class StateMachine(sequenceNumber: Int, replicasInfo: Array[String], application: ActorRef) extends Actor with ActorLogging {
+class StateMachine(val application: ActorRef, val sequenceNumber: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
 
+  var multipaxos: ActorRef = context.actorOf(Multipaxos.props(application, self, sequenceNumber, replicasInfo), "multipaxos"+sequenceNumber)
   var sequencePosition: Int = 0
-  var operationsToExecute: SortedMap[Int, Operation] = SortedMap.empty[Int, Operation]
+  var operations: SortedMap[Int, Operation] = SortedMap.empty[Int, Operation]
+  var lastExecutedOperationPosition: Int = 0
+  var operationsWaiting: ListBuffer[Operation] =  ListBuffer.empty[Operation] // operations waiting to be proposed in the next batch
+  var numberOfOperationsProposed: Int = 0
+  var leader: ActorRef = _
+  var proposeOperationsSchedule: Cancellable = _
+  val BATCH_SIZE: Int = 10
+  val BATCH_TIME_LIMIT: Int = 500 // forçar um propose se houverem operações à espera durante mais de 500 milliseconds
+  var nextBatchTimeLimit: Long = 0
 
-  var oldSequenceNumber: Int = sequenceNumber
-  var currentSequenceNum: Int = sequenceNumber
-  var replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
-  var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-  var currentLeader: ActorRef = _
-  var oldLeader: ActorRef = _
-  var promise: Int = -1
-  var prepareAcks: Int = 0
-
-  var monitorLeaderSchedule: Cancellable = _
-  var leaderHeartbeatSchedule: Cancellable = _
-  var prepareTimeout: Cancellable = _
-
-  var paxos: ActorRef = context.actorOf(Multipaxos.props(self, replicas, sequenceNumber, promise), "multipaxos"+sequenceNumber)
-
-  var leaderLastHeartbeat: Long = 0
-  var LEADER_TTL: Long = 6000 // leader sends heartbeats every 3 seconds
-
-  this.overrideLeader()
-
-  def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
-    var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
-    replicasInfo.foreach(replica => replicas += context.actorSelection(s"akka.tcp://Server@$replica"))
-    this.logInfo(s"Initial replicas: $replicas")
-    replicas
-  }
-
-  private def overrideLeader(): Unit = {
-    this.logInfo(s"Trying to be the leader")
-    prepareAcks = 0
-    replicas.foreach(replica => {
-      this.logInfo(s"Sending prepare to $replica")
-      replica ! Prepare(currentSequenceNum)
-    })
-    if (prepareTimeout != null)
-      prepareTimeout.cancel()
-    prepareTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, PrepareTimeout)
-  }
-
-  private def propose(operation: Operation): Unit = {
-    paxos ! Propose(sequencePosition, operation)
-  }
-
-  private def executeOperations(): Unit = {
-    var previousPos = -1
+  private def executePendingOperations(): Unit = {
+    var previousPosition = -1
     breakable {
-      for ((currentPos, operation) <- operationsToExecute.iterator) {
-        if (previousPos != -1 && previousPos - currentPos != 1) {
+      for ((currentPosition, operation) <- operations.drop(lastExecutedOperationPosition + 1).iterator) {
+        if (previousPosition != -1 && previousPosition - currentPosition != 1) {
           break
         }
         operation match {
           case WriteOperation(key, value, requestId) =>
-            write(key, value, requestId)
+            writeValue(key, value, requestId)
           case AddReplicaOperation(replica) =>
-            addReplica(replica)
+            addReplica(replica, currentPosition)
           case RemoveReplicaOperation(replica) =>
-            removeReplica(replica)
+            removeReplica(replica, currentPosition)
           case _ =>
-            log.error(s"stateMachine$sequenceNumber got unexpected operation $operation")
+            log.error(s"Got unexpected operation $operation")
         }
-        operationsToExecute -= currentPos
-        previousPos = currentPos
+        lastExecutedOperationPosition = currentPosition
+        previousPosition = currentPosition
       }
     }
   }
 
-  private def write(key: String, value: String, requestId: String): Unit = {
-    this.logInfo(s"Executed write: key=$key value=$value")
+  private def writeValue(key: String, value: String, requestId: String): Unit = {
+    logInfo(s"Executed write: key=$key value=$value")
     application ! WriteResponse(WriteOperation(key, value, requestId))
   }
 
-  private def addReplica(replica: ActorRef): Unit = {
-    this.logInfo(s"Added replica: $replica")
-    val replicaSelection = context.actorSelection(s"akka.tcp://$replica")
-    replicas += replicaSelection
-    majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-    paxos ! AddReplica(replicaSelection)
-    /*    if (currentLeader == self)
-          replica ! CopyState(replicas, serviceMap)*/
+  private def addReplica(replica: ActorRef, seqPosition: Int): Unit = {
+    logInfo(s"Adding replica: $replica at position $seqPosition")
+    multipaxos ! AddNewReplica(seqPosition, replica)
+    if (leader == self) {
+      replica ! SetStateMachineState(sequencePosition, operations.filterKeys(_ < seqPosition))
+    }
   }
 
-  private def removeReplica(replica: ActorRef): Unit = {
-    this.logInfo(s"Removed replica: $replica")
-    val replicaSelection = context.actorSelection(s"akka.tcp://$replica")
-    replicas -= replicaSelection
-    majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
-    paxos ! RemoveReplica(replicaSelection)
+  private def removeReplica(replica: ActorRef, seqPosition: Int): Unit = {
+    logInfo(s"Removing replica: $replica")
+    multipaxos ! RemoveOldReplica(seqPosition, replica)
+  }
+
+  private def scheduleProposes(): Unit = {
+    logInfo("Checking operations batch")
+    nextBatchTimeLimit = System.currentTimeMillis() + BATCH_TIME_LIMIT
+    proposeOperationsSchedule = context.system.scheduler.schedule(0 millis, BATCH_TIME_LIMIT millis) {
+      if (operationsWaiting.size >= BATCH_SIZE || operationsWaiting.nonEmpty && System.currentTimeMillis() >= nextBatchTimeLimit) {
+        numberOfOperationsProposed = operationsWaiting.size
+        multipaxos ! Propose(sequencePosition, operationsWaiting.toList)
+        proposeOperationsSchedule.cancel()
+        logInfo(s"Proposed batch $operationsWaiting with size ${operationsWaiting.size}")
+      }
+    }
   }
 
   private def logInfo(msg: String): Unit = {
-    log.info(s"\n${self.path.name}-$currentSequenceNum: $msg")
+    log.info(s"\n${self.path.name}: $msg")
   }
 
   override def receive: PartialFunction[Any, Unit] = {
 
-    case SetLeader(sequenceNumber: Int, leader: Node) =>
-      if (sequenceNumber >= promise) {
-        this.logInfo(s"Changing leader to $leader because promise $promise < sequenceNumber $sequenceNumber")
-        if (leaderHeartbeatSchedule != null) {
-          leaderHeartbeatSchedule.cancel()
+    case msg @ WriteValue(key: String, value: String, requestId: String) =>
+      logInfo(s"Got write request key=$key value=$value requestId=$requestId from $sender")
+      if (leader != null) {
+        if (leader == self) {
+          logInfo(s"Proposed write request $requestId")
+          operationsWaiting += WriteOperation(key, value, requestId)
+        } else {
+          logInfo(s"Write request $requestId redirected to leader $leader")
+          leader forward msg
         }
-        if (monitorLeaderSchedule != null) {
-          monitorLeaderSchedule.cancel()
-        }
+      } else {
+        logInfo(s"Write request $requestId ignored. Leader is unknown")
+      }
 
-        if (leader.stateMachine == self) { // self becomes leader
-          leaderHeartbeatSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, SignalLeaderAlive)
-          currentSequenceNum = 0
-          paxos ! SetSequenceNumber(currentSequenceNum)
-          if (oldLeader != null && currentLeader != self) {
-            context.system.scheduler.scheduleOnce(5 seconds) {
-              if (currentLeader == self) {
-                this.logInfo(s"Proposing to remove replica $oldLeader")
-                self ! SMPropose(RemoveReplicaOperation(oldLeader))
-                oldLeader = null
-              }
-            }
+    case msg @ AddReplica(replica: ActorRef) =>
+      if (leader != null) {
+        if (leader == self) {
+          logInfo(s"Proposed Add replica $replica request")
+          operationsWaiting += AddReplicaOperation(replica) //TODO não fazer batch de addreplica
+        } else {
+          logInfo(s"Add replica $replica request redirected to leader $leader")
+          leader forward msg
+        }
+      } else {
+        logInfo(s"Add replica $replica request ignored. Leader is unknown")
+      }
+
+    case msg @ RemoveReplica(replica: ActorRef) =>
+      if (leader != null) {
+        if (leader == self) {
+          logInfo(s"Proposed Remove replica $replica request")
+          operationsWaiting += RemoveReplicaOperation(replica)  //TODO não fazer batch de removereplica
+        } else {
+          logInfo(s"Remove replica $replica request redirected to leader $leader")
+          leader forward msg
+        }
+      } else {
+        logInfo(s"Remove replica $replica request ignored. Leader is unknown")
+      }
+
+    case Decided(seqPosition: Int, ops: List[Operation]) =>
+      logInfo(s"Got decided operations $ops for position $seqPosition")
+      ops.zipWithIndex.foreach{case (op, index) => {
+        operations += (seqPosition + index) -> op
+      }}
+      sequencePosition += ops.size
+      operationsWaiting = operationsWaiting.drop(numberOfOperationsProposed + 1)
+      numberOfOperationsProposed = 0
+      executePendingOperations()
+      if (leader == self) {
+        scheduleProposes()
+      }
+
+    case UpdateLeader(newLeader: Node) =>
+      logInfo(s"Updating leader $newLeader")
+      leader = newLeader.stateMachine
+      if (leader != null) {
+        if (leader == self) {
+          scheduleProposes()
+        } else {
+          if (proposeOperationsSchedule != null) {
+            proposeOperationsSchedule.cancel()
           }
-        }
-        else if (currentLeader == self) { // self is no longer leader
-          currentSequenceNum = oldSequenceNumber
-          paxos ! SetSequenceNumber(currentSequenceNum)
-        }
-        currentLeader = leader.stateMachine
-        paxos ! UpdateLeader(leader.paxos)
-        application ! UpdateLeader(leader.application)
-        promise = sequenceNumber
-        paxos ! SetPromise(promise)
-        if (currentLeader != self) {
-          monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, CheckLeaderAlive)
-          leaderLastHeartbeat = System.currentTimeMillis()
+          operationsWaiting = ListBuffer.empty[Operation]
+          numberOfOperationsProposed = 0
+          nextBatchTimeLimit = 0
         }
       }
-      else {
-        this.logInfo(s"Refusing to change leader to $leader because promise $promise >= sequenceNumber $sequenceNumber")
-      }
+      application ! UpdateLeader(newLeader)
 
-    case SignalLeaderAlive =>
-      if (currentLeader == self) {
-        this.logInfo(s"Sent heartbeat")
-        replicas.foreach(replica => replica ! LeaderHeartbeat)
-      }
-      else {
-        leaderHeartbeatSchedule.cancel()
-      }
-
-    case LeaderHeartbeat =>
-      this.logInfo(s"Got heartbeat from $sender and leader is $currentLeader")
-      if (sender == currentLeader) {
-        leaderLastHeartbeat = System.currentTimeMillis()
-      }
-
-    case CheckLeaderAlive =>
-      this.logInfo(s"Checking health of leader $currentLeader")
-      if (currentLeader != null) {
-        if (System.currentTimeMillis() > leaderLastHeartbeat + LEADER_TTL) {
-          monitorLeaderSchedule.cancel()
-          oldLeader = currentLeader
-          currentLeader = null
-          paxos ! UpdateLeader(null)
-          application ! UpdateLeader(null)
-          this.overrideLeader()
-        }
-      } else {
-        monitorLeaderSchedule.cancel()
-      }
-
-    case Prepare(n) =>
-      this.logInfo(s"Got prepare from $sender")
-      if (n > promise) {
-        this.logInfo(s"Sending prepare_ok to $sender because promise $promise < sequenceNumber $n")
-        promise = n
-        paxos ! SetPromise(promise)
-        sender ! Prepare_OK(n, sequencePosition)
-      } else {
-        this.logInfo(s"Rejecting prepare from $sender because promise $promise >= sequenceNumber $n")
-      }
-      if (n > currentSequenceNum && prepareTimeout != null) //TODO confirmar isto
-        prepareTimeout.cancel()
-
-    case Prepare_OK(n, acceptedN) =>
-      this.logInfo(s"Got prepare_ok from $sender")
-      if (n == currentSequenceNum) {
-        prepareAcks += 1
-        if (prepareAcks >= majority) {
-          if (prepareTimeout != null)
-            prepareTimeout.cancel()
-          this.logInfo(s"Got majority. I'm the leader now")
-          replicas.foreach(replica => replica ! SetLeader(currentSequenceNum, Node(application, self, paxos)))
-        }
-      }
-
-    case PrepareTimeout =>
-      this.logInfo(s"Prepare timed out. New sequence number = ${currentSequenceNum + replicas.size}")
-      currentSequenceNum += replicas.size
-      paxos ! SetSequenceNumber(currentSequenceNum)
-      oldSequenceNumber = currentSequenceNum
-      this.overrideLeader()
-
-    case Decided(stateMachinePosition, operation) =>
-      operationsToExecute += stateMachinePosition -> operation
-      sequencePosition += 1
-      this.executeOperations()
-
-    case msg @ Accept(stateMachinePosition, sequenceNumber, operation) =>
-      paxos forward msg
-
-    case msg @ Accept_OK(sequenceNumber, stateMachinePosition) =>
-      paxos forward msg
-
-
-/*    case SetState(sequenceNumber: Int, stateMachinePosition: Int, operation: Operation) =>
-      sqnOfAcceptedOp = sequenceNumber
-      acceptedN = stateMachinePosition
-      acceptedOp = operation*/
-
-    case SetSequenceNumber(sequenceNumber: Int) =>
-      currentSequenceNum = sequenceNumber
-
-    case WriteValue(key: String, value: String, requestId: String) =>
-      this.propose(WriteOperation(key, value, requestId))
+    case SetStateMachineState(seqPosition: Int, ops: SortedMap[Int, Operation]) =>
+      sequencePosition = seqPosition
+      operations ++= ops
+      leader = sender
+      executePendingOperations()
 
     case Debug =>
-      this.logInfo(s"\n" +
-        s"  - OperationsToExecute: $operationsToExecute\n" +
+      logInfo(s"\n" +
+        s"  - Multipaxos: $multipaxos\n" +
         s"  - SequencePosition: $sequencePosition\n" +
-        s"  - OldSqn: $oldSequenceNumber\n" +
-        s"  - currentSequenceNum: $currentSequenceNum\n" +
-        s"  - Replicas: $replicas}\n" +
-        s"  - Majority: $majority\n" +
-        String.format("  - CurrentLeader: %s\n", if (currentLeader == null) "null" else currentLeader.path.name) +
-        s"  - Promise: $promise\n" +
-        s"  - PrepareAcks: $prepareAcks\n" +
-        s"  - Paxos: $paxos\n" +
-        s"  - LeaderLastHeartbeat: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(leaderLastHeartbeat))}\n")
+        s"  - Operations: $operations\n" +
+        s"  - LastExecutedOperationPosition: $lastExecutedOperationPosition\n" +
+        s"  - NumberOfOperationsProposed: $numberOfOperationsProposed\n" +
+        s"  - OperationsWaiting: $operationsWaiting\n" +
+        s"  - Leader: $leader\n" +
+        s"  - NextBatchTimeLimit: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(nextBatchTimeLimit))}")
+      multipaxos ! Debug
 
-    case _ =>
-      this.logInfo(s"Got unexpected message from $sender")
+    case msg @ _ =>
+      log.warning(s"\nGot unexpected message $msg from $sender")
   }
 
 }

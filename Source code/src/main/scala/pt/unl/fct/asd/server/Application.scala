@@ -33,10 +33,10 @@ object Application extends App {
 class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Actor with ActorLogging {
 
   val stateMachine: ActorRef = context.actorOf(
-    StateMachine.props(sequenceNumber, replicasInfo, self), name = s"stateMachine$sequenceNumber")
-  var keyValueStore: Map[String, String] = Map.empty[String, String]  // key -> value
-  var clientWrites: Map[String, String] = Map.empty[String, String] // requestId -> result
-  var pendingWrites: Set[String] = Set.empty[String] // set of client requestIds
+    StateMachine.props(self, sequenceNumber, replicasInfo), name = s"stateMachine$sequenceNumber")
+  var keyValueStore: Map[String, String] = Map.empty[String, String]  // key value store. key -> value
+  var lastClientWrites: Map[String, String] = Map.empty[String, String] // last write of each client. requestId -> result
+  var pendingWrites: Set[String] = Set.empty[String] // set of client requestIds pending to be replied
   var leader: ActorRef = _
   val r = new Random
 
@@ -47,46 +47,59 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
   override def receive(): PartialFunction[Any, Unit] = {
 
     case Read(key: String) =>
-      this.logInfo(s"Read key=$key value=${keyValueStore.get(key)}")
+      logInfo(s"Read key=$key value=${keyValueStore.get(key)}")
       sender ! Response(result = keyValueStore.get(key))
 
-    case Write(key: String, value: String, timestamp: Long) =>
-      this.logInfo(s"Write key=$key timestamp=$timestamp")
+    case msg @ Write(key: String, value: String, timestamp: Long) =>
+      logInfo(s"Write key=$key value=$value timestamp=$timestamp")
       val requestId: String = s"${sender.path}_$timestamp"
-      if (clientWrites.contains(requestId)) {
-        sender ! Response(result = clientWrites.get(requestId))
+      if (lastClientWrites.contains(requestId)) {
+        sender ! Response(result = lastClientWrites.get(requestId))
       } else if (leader != null) {
         pendingWrites += requestId
         if (self == leader) {
           stateMachine ! WriteValue(key, value, requestId)
         } else {
-          leader forward Write(key, value, timestamp)
+          leader forward msg
         }
       }
 
     case WriteResponse(operation: WriteOperation) =>
-      this.logInfo(s"Got write response $operation")
+      logInfo(s"Got write response $operation")
       val key: String = operation.key
       val value: String = operation.value
       val requestId: String = operation.requestId
       val result = keyValueStore.get(key)
       val clientInfo: Array[String] = requestId.split("_")
-      clientWrites = clientWrites.filterKeys(k => !k.contains(clientInfo(0)))
-      clientWrites += (requestId -> value)
+      lastClientWrites = lastClientWrites.filterKeys(k => !k.contains(clientInfo(0)))
+      lastClientWrites += (requestId -> value)
       keyValueStore += (key -> value)
       if (pendingWrites.contains(requestId)) {
-        this.logInfo(s"Replying to the client $operation")
+        logInfo(s"Replying to the client $operation")
         pendingWrites -= requestId
         val client = context.actorSelection(s"${clientInfo(0)}")
         client ! Response(result)
       }
       else {
-        this.logInfo(s"Not replying to the client $operation")
+        logInfo(s"Replicated operation $operation")
       }
 
-    case UpdateLeader(newLeader) =>
-      this.logInfo(s"Update leader $newLeader")
-      leader = newLeader
+    case UpdateLeader(newLeader: Node) =>
+      logInfo(s"Updating leader $newLeader")
+      leader = newLeader.application
+
+    case Debug =>
+      logInfo(s"\n" +
+        s"  - StateMachine: $stateMachine\n" +
+        s"  - KeyValueStore: $keyValueStore\n" +
+        s"  - LastClientWrites: $lastClientWrites\n" +
+        s"  - PendingWrites: $pendingWrites\n" +
+        s"  - Leader: $leader")
+      stateMachine ! Debug
+
+    case msg @ _ =>
+      log.warning(s"\nGot unexpected message $msg from $sender")
+
   }
 
 }

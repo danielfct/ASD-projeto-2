@@ -8,11 +8,21 @@ package object asd {
     akka {
       loglevel = "INFO"
       log-config-on-start = "off"
+      log-dead-letters-during-shutdown = "off"
+      log-dead-letters = "off"
       debug {
         receive = on
       }
       actor {
         provider = "akka.remote.RemoteActorRefProvider"
+        serializers {
+          proto = "akka.remote.serialization.ProtobufSerializer"
+        }
+        serialization-bindings {
+          "pt.unl.fct.asd.client.package" = proto
+          "pt.unl.fct.asd.server.package" = proto
+        }
+
       }
       remote {
         enabled-transports = ["akka.remote.netty.tcp"]
