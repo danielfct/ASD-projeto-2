@@ -44,7 +44,7 @@ object StateMachine {
 }
 
 class Operation(var operationType: String)
-class ClientOperation(val oType: String, var key: String, var value: Option[String] = None, var reqid: Long)
+class ClientOperation(var oType: String, var key: String, var value: Option[String] = None, var reqid: Long)
   extends Operation(oType)
 class ReplicaOperation(var oType: String, var replica: ActorRef)
   extends Operation(oType)
@@ -71,10 +71,13 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
   var leaderHeartbeatSchedule: Cancellable = _
   var prepareTimeout: Cancellable = _
   var getKeySchedule: Cancellable = _
+  var collectOperationsSchedule: Cancellable = _
 
   var paxos = context.actorOf(Multipaxos.props(self, replicas, mySequenceNumber, myPromise), "multipaxos"+mySequenceNumber)
   var resultsBackup = Map.empty[Long,String]
   var replicaAddedInSmPos = Map.empty[ActorRef,Int] // position in the state machine sequence in which the replica was added
+  var operationsWaiting = Map.empty[Long,Operation] // operations waiting to be proposed in the next batch
+  var keysSnapshot = Set.empty[Long]
 
   var leaderLastHeartbeat: Long = 0
   var TTL: Long = 6000 // leader sends heartbeats every 3 seconds
@@ -138,6 +141,18 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
          removeReplica(operation.asInstanceOf[ReplicaOperation].replica)
       }
   }
+  
+  private def scheduleProposes(): Unit = {
+    collectOperationsSchedule = context.system.scheduler.schedule(1 second, 1 second) {
+      val copy = operationsWaiting.toMap.take(5) // max batch is 5 operations
+      keysSnapshot = copy.keySet
+      val toPropose = copy.values.toList
+      if (toPropose.nonEmpty) {
+        self ! SMPropose(toPropose)
+        collectOperationsSchedule.cancel()
+      }
+    }
+  }
 
   private def debug(): Unit = {
     val name: String = self.path.name
@@ -172,17 +187,21 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
         if (leaderHeartbeatSchedule != null) {
           leaderHeartbeatSchedule.cancel()
         }
+        if(collectOperationsSchedule != null) {
+          collectOperationsSchedule.cancel()
+        }
         if (monitorLeaderSchedule != null) {
           monitorLeaderSchedule.cancel()
         }
         if (leader == self) { // self becomes leader
           leaderHeartbeatSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, SignalLeaderAlive)
+          scheduleProposes()
           mySequenceNumber = 0
           paxos ! SetSequenceNumber(mySequenceNumber)
           if (oldLeader != null && currentLeader != self) {
             context.system.scheduler.scheduleOnce(5 seconds) {
               if (currentLeader == self) {
-                self ! SMPropose(new ReplicaOperation(StateMachine.REMOVE_REPLICA, oldLeader))
+                self ! SMPropose(List(new ReplicaOperation(StateMachine.REMOVE_REPLICA, oldLeader)))
                 oldLeader = null
               }
             }
@@ -199,6 +218,8 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
         if (currentLeader != self) {
           monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds, self, CheckLeaderAlive)
           leaderLastHeartbeat = System.currentTimeMillis()
+          if(collectOperationsSchedule != null)
+            collectOperationsSchedule.cancel()
         }
       }
       else {
@@ -271,7 +292,8 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       
     case msg @ Put(id, key, value) => {
       if (currentLeader == self) {
-        self ! SMPropose(new ClientOperation(StateMachine.PUT, key, Some(value), id))
+        val operation = new ClientOperation(StateMachine.PUT, key, Some(value), id)
+        operationsWaiting += id -> operation
         sender ! Response(id,serviceMap.get(key).getOrElse("empty"))
       } else currentLeader forward msg
     }
@@ -286,35 +308,45 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
     
     case msg @ AddReplica(rep) => {
       if (currentLeader == self)
-        self ! SMPropose(new ReplicaOperation(StateMachine.ADD_REPLICA, rep))
+        self ! SMPropose(List(new ReplicaOperation(StateMachine.ADD_REPLICA, rep)))
       else currentLeader forward msg
     }
-
-    case SMPropose(operation) => {
-      var propose = true
-      if(operation.operationType.equals(StateMachine.PUT)) {
-        val op = operation.asInstanceOf[ClientOperation]
-        val reqid = op.reqid
-        if (resultsBackup.contains(reqid)) {
-          log.info("Repeated operation detected! reqid={}, key={}, value={}", reqid, op.key, op.value.getOrElse("empty"))
-          sender ! Response(reqid, resultsBackup.get(reqid).get)
-          propose = false
-        } else sender ! Response(reqid, serviceMap.get(op.key).getOrElse("empty"))
-      }
-      if (propose) {
-        log.info(s"stateMachine$mySequenceNumber will send propose($currentN,$operation)")
-        paxos ! Propose(currentN, operation)
-      }
+    
+    case SMPropose(operations) => {
+      var toPropose = List.empty[Operation]
+      operations.foreach(operation => {
+        var propose = true
+        if(operation.operationType.equals(StateMachine.PUT)) {
+          val op = operation.asInstanceOf[ClientOperation]
+          val reqid = op.reqid
+          if (resultsBackup.contains(reqid)) {
+            log.info("Repeated operation detected! reqid={}, key={}, value={}", reqid, op.key, op.value.getOrElse("empty"))
+            sender ! Response(reqid, resultsBackup.get(reqid).get)
+            propose = false
+          } else sender ! Response(reqid, serviceMap.get(op.key).getOrElse("empty"))
+        }
+        if (propose) {
+          log.info(s"stateMachine$mySequenceNumber will send propose($currentN,$operation)")
+          toPropose = toPropose :+ operation
+        }
+      })
+      if (toPropose.nonEmpty)
+        paxos ! Propose(currentN, toPropose)
     }
 
-    case Decided(smPos, operation) =>
-      operationsToExecute += smPos -> operation 
-      if (operation.operationType.equals(StateMachine.ADD_REPLICA)) {
-        val rep = operation.asInstanceOf[ReplicaOperation].replica
-        replicaAddedInSmPos += rep -> smPos
-      }
+    case Decided(smPos, operations) =>
+      operations.zipWithIndex.foreach{case (operation, index) => {
+        operationsToExecute += (smPos+index) -> operation
+        if (operation.operationType.equals(StateMachine.ADD_REPLICA)) {
+          val rep = operation.asInstanceOf[ReplicaOperation].replica
+          replicaAddedInSmPos += rep -> (smPos+index)
+        }
+      }}
       self ! ExecuteOperations
-      currentN += 1
+      currentN += operations.size
+      keysSnapshot.foreach(key => operationsWaiting -= key)
+      keysSnapshot = Set.empty[Long]
+      scheduleProposes()
 
     case msg @ Accept(sqn, smPos, op) =>
       paxos forward msg
@@ -327,6 +359,7 @@ class StateMachine(sequenceNumber: Int/*, replicasInfo:Array[String]*/) extends 
       if (opsToExecute.nonEmpty) {
         var it = opsToExecute.iterator
         var (previous, operation) = it.next()
+        positionOfLastOpExecuted += 1
         doOperation(operation)
         breakable {
           for ((position, operation) <- it) {

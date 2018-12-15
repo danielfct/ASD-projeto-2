@@ -19,17 +19,17 @@ final case class Prepare(n: Int)
 
 final case class Prepare_OK(n: Int, acceptedN: Int)
 
-final case class SMPropose(op: Operation)
+final case class SMPropose(ops: List[Operation])
 
 final case class CopyState(replicas: Set[ActorRef], operationsToExecute: SortedMap[Int,Operation], promise: Int, smPos: Int)
 
-final case class Propose(N: Int, op: Operation)
+final case class Propose(N: Int, ops: List[Operation])
 
-final case class Accept(sqn: Int, N: Int, op: Operation)
+final case class Accept(sqn: Int, N: Int, ops: List[Operation])
 
 final case class Accept_OK(sqn: Int, N: Int)
 
-final case class Decided(N: Int, op: Operation)
+final case class Decided(N: Int, ops: List[Operation])
 
 case object ExecuteOperations
 

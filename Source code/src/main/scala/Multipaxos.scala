@@ -12,7 +12,7 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise:
   var replicas: Set[ActorRef] = reps
   var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
   var mySequenceNumber: Int = sqn
-  var currentOp: Operation = _
+  var currentOps: List[Operation] = List.empty[Operation]
   var currentSmPos: Int = -1
   var acceptedAcks: Int = 0
   var myPromise: Int = promise
@@ -26,22 +26,21 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise:
 
   override def receive: PartialFunction[Any, Unit] = {
 
-    case Propose(smPos: Int, op: Operation) => {
-      log.info("multipaxos{} will propose N:{} op:{}. (myPromise={})", mySequenceNumber, smPos, op.operationType, myPromise)
+    case Propose(smPos: Int, ops: List[Operation]) => {
+      log.info("multipaxos{} will propose N:{} ops:{}. (myPromise={})", mySequenceNumber, smPos, ops, myPromise)
       currentSmPos = smPos
-      currentOp = op
+      currentOps = ops
       accepted = false
-      replicas.foreach(rep => rep ! Accept(mySequenceNumber, smPos, op))
+      replicas.foreach(rep => rep ! Accept(mySequenceNumber, smPos, ops))
       acceptTimeout = context.system.scheduler.scheduleOnce(5 seconds, self, Restart(mySequenceNumber))    
     }
       
-    case Accept(sqn: Int, smPos: Int, op: Operation) =>
-      log.info("multipaxos{} got accept N:{} op:{}. (myPromise={})", mySequenceNumber, smPos, op.operationType, myPromise)
-      // TODO: if i think im the leader -> I have to become a normal replica
+    case Accept(sqn: Int, smPos: Int, ops: List[Operation]) =>
+      log.info("multipaxos{} got accept N:{} ops:{}. (myPromise={})", mySequenceNumber, smPos, ops, myPromise)
       if (sqn >= myPromise || isLeader(sender,currentLeader)) {
         log.info(s"multipaxos$mySequenceNumber accepted!")
         currentSmPos = smPos
-        currentOp = op
+        currentOps = ops
         sender ! Accept_OK(sqn, smPos)
       } else {
         //sender ! Restart(sqn)
@@ -56,7 +55,7 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise:
           log.info("multipaxos{} got accept_ok from majority N:{}", mySequenceNumber, smPos)
           if (acceptTimeout != null)
             acceptTimeout.cancel()
-          replicas.foreach(rep => rep ! Decided(currentSmPos, currentOp))
+          replicas.foreach(rep => rep ! Decided(currentSmPos, currentOps))
         }
       }
 
@@ -66,7 +65,7 @@ class Multipaxos(stateMachine: ActorRef, reps: Set[ActorRef], sqn: Int, promise:
         acceptedAcks = 0
         mySequenceNumber = mySequenceNumber + replicas.size
         stateMachine ! SetSequenceNumber(mySequenceNumber)
-        self ! Propose(currentSmPos, currentOp)
+        self ! Propose(currentSmPos, currentOps)
       }
     }     
 
