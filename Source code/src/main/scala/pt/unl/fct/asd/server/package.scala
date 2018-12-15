@@ -4,7 +4,8 @@ import akka.actor.{ActorRef, ActorSelection}
 
 package object server {
 
-  final case class SetLeader(sqn: Int, leader: ActorRef)
+  final case class SetLeader(sqn: Int, leader: Node)
+  final case class UpdateLeader(leader: ActorRef)
   final case class Prepare(n: Int)
   final case class Prepare_OK(n: Int, acceptedN: Int)
   final case class SMPropose(op: Operation)
@@ -24,6 +25,8 @@ package object server {
   case object CheckLeaderAlive
   case object Debug
 
+  final case class Node(application: ActorRef, stateMachine: ActorRef, paxos: ActorRef)
+
   sealed trait Operation
   case class ReadOperation(key: String, requestId: String) extends Operation
   case class WriteOperation(key: String, value: String, requestId: String) extends Operation
@@ -38,7 +41,6 @@ package object server {
   final case class WriteResponse(operation: WriteOperation)
 
   final case class ReadResponse(result: String, operation: ReadOperation)
-
 
 
 }

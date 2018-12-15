@@ -4,7 +4,7 @@ package server
 import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, ActorSystem, Props}
 import akka.util.Timeout
 import com.typesafe.config.Config
-import pt.unl.fct.asd.buildConfiguration
+import pt.unl.fct.asd.{buildConfiguration, client}
 import pt.unl.fct.asd.client.Client
 import pt.unl.fct.asd.client.Client.args
 import pt.unl.fct.asd.server.Application.{replicasInfo, sequenceNumber, system}
@@ -14,8 +14,8 @@ import scala.concurrent.Await
 import scala.util.Random
 
 object Application extends App {
-  if (args.length < 6) {
-    println("Usage: \"sbt runMain Application sequenceNumber ip port replica1 replica2 replica3 [replica4, ...]\"")
+  if (args.length < 4) {
+    println("Usage: \"sbt runMain Application sequenceNumber ip port replica1 [replica2, ...]\"")
     System.exit(1)
   }
   val sequenceNumber = args(0).toInt
@@ -25,64 +25,68 @@ object Application extends App {
   val config: Config = buildConfiguration(hostname, port)
 
   implicit val system: ActorSystem = ActorSystem("Server", config)
-  val application: ActorRef = system.actorOf(Application.props(replicasInfo), s"application$sequenceNumber")
-  system.actorOf(StateMachine.props(sequenceNumber, replicasInfo, application), s"stateMachine$sequenceNumber")
+  system.actorOf(Application.props(replicasInfo, sequenceNumber), s"application$sequenceNumber")
 
-  def props(replicasInfo: Array[String]): Props = Props(new Application(replicasInfo))
+  def props(replicasInfo: Array[String], sequenceNumber: Int): Props = Props(new Application(replicasInfo, sequenceNumber))
 }
 
-class Application(replicasInfo: Array[String]) extends Actor with ActorLogging {
+class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Actor with ActorLogging {
 
-  val replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
+  val stateMachine: ActorRef = context.actorOf(
+    StateMachine.props(sequenceNumber, replicasInfo, self), name = s"stateMachine$sequenceNumber")
   var keyValueStore: Map[String, String] = Map.empty[String, String]  // key -> value
   var clientWrites: Map[String, String] = Map.empty[String, String] // requestId -> result
+  var pendingWrites: Set[String] = Set.empty[String] // set of client requestIds
   var leader: ActorRef = _
   val r = new Random
 
-  def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
-    var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
-    for (i <- replicasInfo.indices) {
-      val replicaInfo: String = replicasInfo(i)
-      replicas += context.actorSelection(s"akka.tcp://Server@$replicaInfo")
-    }
-    log.info(s"\nInitial replicas: $replicas")
-    replicas
-  }
-
-  private def randomReplica(): ActorSelection = {
-    val index = r.nextInt(replicas.size)
-    replicas.toSeq(index)
+  private def logInfo(msg: String): Unit = {
+    log.info(s"\nApplication layer: $msg")
   }
 
   override def receive(): PartialFunction[Any, Unit] = {
 
     case Read(key: String) =>
-      log.info(s"\nApplication layer: read key=$key value=${keyValueStore.get(key)}")
+      this.logInfo(s"read key=$key value=${keyValueStore.get(key)}")
       sender ! Response(result = keyValueStore.get(key))
 
     case Write(key: String, value: String, timestamp: Long) =>
-      log.info(s"\nApplication layer: write key=$key timestamp=$timestamp")
+      this.logInfo(s"write key=$key timestamp=$timestamp")
       val requestId: String = s"${sender.path}_$timestamp"
-      if (clientWrites.contains(requestId))
+      if (clientWrites.contains(requestId)) {
         sender ! Response(result = clientWrites.get(requestId))
-      else if (leader != null)
-        leader ! WriteValue(key, value, requestId)
-      else
-        randomReplica ! WriteValue(key, value, requestId)
+      } else if (leader != null) {
+        pendingWrites += requestId
+        if (self == leader) {
+          stateMachine ! WriteValue(key, value, requestId)
+        } else {
+          leader forward Write(key, value, timestamp)
+        }
+      }
 
     case WriteResponse(operation: WriteOperation) =>
-      log.info(s"\nApplication layer: got write response $operation")
-      leader = sender  //TODO atualizar o leader como se atualiza no paxos
-      val result = keyValueStore.get(operation.key)
-      val clientInfo: Array[String] = operation.requestId.split("_")
-      val client = context.actorSelection(s"${clientInfo(0)}")
-      if (clientInfo(1).toLong > System.currentTimeMillis()) {
-        clientWrites = clientWrites.filterKeys(k => !k.contains(clientInfo(0)))
-        clientWrites += (operation.requestId -> operation.value)
-      }
-      keyValueStore += (operation.key -> operation.value)
-      // TODO if current is leader
+      this.logInfo(s"got write response $operation")
+      val key: String = operation.key
+      val value: String = operation.value
+      val requestId: String = operation.requestId
+      val result = keyValueStore.get(key)
+      val clientInfo: Array[String] = requestId.split("_")
+      clientWrites = clientWrites.filterKeys(k => !k.contains(clientInfo(0)))
+      clientWrites += (requestId -> value)
+      keyValueStore += (key -> value)
+      if (pendingWrites.contains(requestId)) {
+        this.logInfo(s"replying to the client $operation")
+        pendingWrites -= requestId
+        val client = context.actorSelection(s"${clientInfo(0)}")
         client ! Response(result)
+      }
+      else {
+        this.logInfo(s"not replying to the client $operation")
+      }
+
+    case UpdateLeader(newLeader) =>
+      this.logInfo(s"update leader $newLeader")
+      leader = newLeader
   }
 
 }

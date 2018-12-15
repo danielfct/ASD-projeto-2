@@ -4,7 +4,7 @@ package client
 import java.text.SimpleDateFormat
 import java.util.Date
 
-import akka.actor.{Actor, ActorLogging, ActorSelection, ActorSystem, Cancellable, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, ActorSystem, Cancellable, Props}
 import com.typesafe.config.Config
 import pt.unl.fct.asd.server._
 
@@ -39,24 +39,21 @@ object Client extends App {
 class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
 
   val replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
+  var leader: ActorRef = _
   var requests: Map[OperationInfo, Operation] = Map.empty[OperationInfo, Operation]
   var lastOperation: Operation = _
   var startTime: Long = -1L
   var numberOfReads: Int = 0
   var numberOfWrites: Int = 0
   var numberOfTimeouts: Int = 0
-  val REQUEST_TIMEOUT: Int = 5
-  var requestTimeoutSchedule: Cancellable = _
+  val OPERATION_TIMEOUT: Int = 5000
+  var operationTimeoutSchedule: Cancellable = _
   val r = new Random
 
   def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
-    for (i <- replicasInfo.indices) {
-      val replicaInfo: String = replicasInfo(i)
-      replicas += context.actorSelection(s"akka.tcp://Server@$replicaInfo")
-    }
+    replicasInfo.foreach(replica => replicas += context.actorSelection(s"akka.tcp://Server@$replica"))
     log.info(s"\nInitial replicas: $replicas")
-
     replicas
   }
 
@@ -79,13 +76,13 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
   private def resendRead(key: String): Unit = {
     log.info(s"\nResent read operation key=$key")
     randomReplica ! Read(key)
-    requestTimeoutSchedule = context.system.scheduler.scheduleOnce(REQUEST_TIMEOUT seconds, self, OperationTimeout(lastOperation))
+    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis, self, OperationTimeout(lastOperation))
   }
 
   private def resendWrite(key: String, value: String, timestamp: Long): Unit = {
     log.info(s"\nResent write operation key=$key value=$value")
     randomReplica ! Write(key, value, timestamp)
-    requestTimeoutSchedule = context.system.scheduler.scheduleOnce(REQUEST_TIMEOUT seconds, self, OperationTimeout(lastOperation))
+    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis, self, OperationTimeout(lastOperation))
   }
 
   private def sendOperation(): Unit = {
@@ -103,12 +100,12 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
         numberOfWrites += 1
         randomReplica ! Write(key, value, timestamp)
         log.info(s"\nSent write operation key=$key value=$value")
-      case _ =>
     }
-    requestTimeoutSchedule = context.system.scheduler.scheduleOnce(REQUEST_TIMEOUT millis, self, OperationTimeout(lastOperation))
+    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis, self, OperationTimeout(lastOperation))
   }
 
   private def processResponse(): Unit = {
+    Thread.sleep(1000)
     lastOperation match {
       case ReadOperation(_, requestId: String) =>
         requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
@@ -116,6 +113,7 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
       case WriteOperation(_, _, requestId: String) =>
         requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
         requests += OperationInfo(requestId.toLong, System.currentTimeMillis()) -> lastOperation
+        leader = sender
     }
   }
 
@@ -143,11 +141,15 @@ class Client(var numberOfOperations: Int, val replicasInfo: Array[String]) exten
 
     case "START" =>
       startTime = System.currentTimeMillis()
-      this.sendOperation()
+      if (numberOfOperations > 0) {
+        this.sendOperation()
+      } else {
+        this.end()
+      }
 
     case Response(result: Option[String]) =>
-      log.info(s"\nGot response value=$result $numberOfOperations")
-      requestTimeoutSchedule.cancel()
+      log.info(s"\nGot response value=$result\nOperations left: ${numberOfOperations-1}")
+      operationTimeoutSchedule.cancel()
       numberOfOperations -= 1
       this.processResponse()
       if (numberOfOperations > 0) {

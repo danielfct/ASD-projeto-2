@@ -17,13 +17,13 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
   var currentOp: Operation = _
   var currentSmPos: Int = -1
   var acceptedAcks: Int = 0
-  var currentLeader: ActorRef = _
+  var leader: ActorRef = _
   var accepted = false
 
   var acceptTimeout: Cancellable = _
 
-  private def isLeader(s: ActorRef, l: ActorRef): Boolean =
-    s.path.parent.name.equals(l.path.name)
+  private def isLeader(sender: ActorRef): Boolean =
+    sender.path.name.equals(leader.path.name)
 
   override def receive: PartialFunction[Any, Unit] = {
 
@@ -39,14 +39,14 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
       log.info(s"\nmultipaxos$sequenceNumber got accept N:$smPos op:$op (myPromise=$promise)")
       accepted = false
       // TODO: if i think im the leader -> I have to become a normal replica
-      if (sqn >= promise || isLeader(sender,currentLeader)) {
+      if (sqn >= promise || isLeader(sender)) {
         log.info(s"\nmultipaxos$sequenceNumber accepted!")
         currentSmPos = smPos
         currentOp = op
         sender ! Accept_OK(sqn, smPos)
       } else {
         //sender ! Restart(sqn)
-        log.info("multipaxos$mySequenceNumber rejected the accept sender={} leader={}!", sender.path.parent.name, currentLeader.path.name)
+        log.info("multipaxos$mySequenceNumber rejected the accept sender={} leader={}!", sender.path.parent.name, leader.path.name)
       }
 
     case Accept_OK(sqn: Int, smPos: Int) =>
@@ -94,7 +94,9 @@ class Multipaxos(val stateMachine: ActorRef, var replicas: Set[ActorSelection], 
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
       log.info(s"\nmultipaxos$sequenceNumber changed replicas set!")*/
 
-    case SetLeader(_, leader) => currentLeader = leader
+    case UpdateLeader(newLeader) =>
+      log.info(s"\nMultipaxos layer: update leader $newLeader")
+      leader = newLeader
 
   }
 }
