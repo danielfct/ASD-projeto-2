@@ -9,7 +9,7 @@ package object asd {
       loglevel = "INFO"
       log-config-on-start = "off"
       log-dead-letters-during-shutdown = "off"
-      log-dead-letters = "off"
+      log-dead-letters = 1
       debug {
         receive = on
       }
@@ -22,7 +22,6 @@ package object asd {
           "pt.unl.fct.asd.client.package" = proto
           "pt.unl.fct.asd.server.package" = proto
         }
-
       }
       remote {
         enabled-transports = ["akka.remote.netty.tcp"]

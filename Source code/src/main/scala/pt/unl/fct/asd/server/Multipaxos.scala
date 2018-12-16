@@ -17,7 +17,7 @@ object Multipaxos {
 class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequenceNumber: Int, val replicasInfo: Array[String])
   extends Actor with ActorLogging {
 
-  var replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
+  var replicas: Set[ActorSelection] = selectReplicas(replicasInfo)
   var leader: ActorRef = _
   var oldLeader: ActorRef = _
   var majority: Int = Math.ceil((replicas.size + 1.0) / 2.0).toInt
@@ -38,7 +38,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
   def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
     replicasInfo.foreach(replica => replicas += context.actorSelection(s"akka.tcp://Server@$replica"))
-    this.logInfo(s"Initial replicas: $replicas")
+    logInfo(s"Initial replicas: $replicas")
     replicas
   }
 
@@ -52,12 +52,13 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
   }
 
   private def overrideLeader(): Unit = {
-    this.logInfo(s"Trying to be the leader")
+
+    logInfo(s"Trying to be the leader")
     leader = null
     stateMachine ! UpdateLeader(Node(null, null, null))
     prepareAcks = 0
     replicas.foreach(replica => {
-      this.logInfo(s"Sending prepare to $replica")
+      logInfo(s"Sending prepare to $replica")
       replica ! Prepare(sequencePosition, sequenceNumber)
     })
     if (prepareTimeoutSchedule != null) {
@@ -82,7 +83,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       if (System.currentTimeMillis() > leaderLastHeartbeat + LEADER_TTL) {
         monitorLeaderSchedule.cancel()
         oldLeader = leader
-        this.overrideLeader()
+        overrideLeader()
       }
     } else {
       monitorLeaderSchedule.cancel()
@@ -92,7 +93,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
   private def prepareTimeout(): Unit = {
     logInfo(s"Prepare timed out. New sequence number = ${sequenceNumber + replicas.size}")
     sequenceNumber += replicas.size
-    this.overrideLeader()
+    overrideLeader()
   }
 
   private def proposeOldLeaderRemoval(): Unit = {
@@ -104,13 +105,14 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
   }
 
   private def logInfo(msg: String): Unit = {
-    log.info(s"\n${self.path.name}-$sequenceNumber: $msg")
+    /*log.info(s"\n${self.path.name}-$sequenceNumber: $msg")*/
   }
 
   override def receive: PartialFunction[Any, Unit] = {
 
-    case AddReplica(replica: ActorRef) =>
-      stateMachine ! AddReplica(replica)
+    case msg @ AddReplica(replica: ActorRef) =>
+      logInfo(s"Got add replica request $replica")
+      stateMachine ! msg
 
     case SetLeader(seqNumber: Int, newLeader: Node) =>
       if (seqNumber >= promise) {
@@ -214,7 +216,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       }
 
     case msg @ Decided(_, _) =>
-      stateMachine forward msg
+      stateMachine ! msg
 
     case AddNewReplica(seqPosition: Int, replica: ActorRef) =>
       logInfo(s"Adding replica $replica")
@@ -242,10 +244,10 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       leaderLastHeartbeat = System.currentTimeMillis()
 
     case msg @ SetStateMachineState(_, _) =>
-      stateMachine forward msg
+      stateMachine ! msg
 
     case Debug =>
-      logInfo(s"\n" +
+      log.info(s"\n" +
         s"  - Replicas: $replicas\n" +
         s"  - Leader: $leader\n" +
         s"  - OldLeader: $oldLeader\n" +

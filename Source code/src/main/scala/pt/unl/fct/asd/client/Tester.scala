@@ -5,8 +5,10 @@ import com.typesafe.config.Config
 import pt.unl.fct.asd.buildConfiguration
 
 object Tester extends App {
-  if (args.length < 7) {
-    println("Usage: \"sbt runMain Tester initialDelay numberOfClients numberOfOperations percentageOfWrites ip port replica1 [replica2, ...]\"")
+
+  if (args.length < 8) {
+    println("Usage: \"sbt runMain Tester initialDelay numberOfClients numberOfOperations percentageOfWrites " +
+      "ip port replica1 replica2 [replica3, ...]\"")
     System.exit(1)
   }
   val initialDelay: Long = args(0).toLong

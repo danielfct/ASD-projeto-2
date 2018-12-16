@@ -40,7 +40,7 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
   def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
     replicasInfo.foreach(replica => replicas += context.actorSelection(s"akka.tcp://Server@$replica"))
-    this.logInfo(s"\nInitial replicas: $replicas")
+    logInfo(s"\nInitial replicas: $replicas")
     replicas
   }
 
@@ -62,14 +62,15 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
 
   private def resendRead(key: String): Unit = {
     val replica: ActorSelection = randomReplica()
-    this.logInfo(s"Resent read operation key=$key to $replica")
+    logInfo(s"Resent read operation key=$key to $replica")
     replica ! Read(key)
     operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis) { operationTimeout() }
   }
 
   private def resendWrite(key: String, value: String, timestamp: Long): Unit = {
     val replica: ActorSelection = randomReplica()
-    this.logInfo(s"Resent write operation key=$key value=$value to $replica")
+
+    logInfo(s"Resent write operation key=$key value=$value to $replica")
     replica ! Write(key, value, timestamp)
     operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis) { operationTimeout() }
   }
@@ -83,13 +84,13 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
         requests += requestId -> OperationInfo(lastOperation, timestamp, -1L)
         numberOfReads += 1
         replica ! Read(key)
-        this.logInfo(s"Sent read operation key=$key to $replica")
+        logInfo(s"Sent read operation key=$key to $replica")
       case WriteOperation(key: String, value: String, requestId: String) =>
         val timestamp = requestId.toLong
         requests += requestId -> OperationInfo(lastOperation, timestamp, -1L)
         numberOfWrites += 1
         replica ! Write(key, value, timestamp)
-        this.logInfo(s"Sent write operation key=$key value=$value to $replica")
+        logInfo(s"Sent write operation key=$key value=$value to $replica")
       case _ =>
         log.error(s"\nClient can't execute operation $lastOperation")
     }
@@ -113,7 +114,7 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
   }
 
   private def operationTimeout(): Unit = {
-    this.logInfo(s"Timeout $lastOperation")
+    logInfo(s"Timeout $lastOperation")
     numberOfTimeouts += 1
     lastOperation match {
       case ReadOperation(key: String, requestId: String) =>
@@ -131,7 +132,7 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
 
   private def end(): Unit = {
     val stats: Stats = calculateStats()
-    this.logInfo(s"\n" +
+    log.info(s"\n" +
       s"Start time: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(startTime))}\n" +
       s"End time: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(stats.endTime))}\n" +
       s"Duration: ${stats.durationMillis} milliseconds (${stats.durationSeconds} seconds)\n" +
@@ -206,7 +207,7 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
   }
 
   private def logInfo(msg: String): Unit = {
-    log.info(s"\n${self.path.name}: $msg")
+   /* log.info(s"\n${self.path.name}: $msg")*/
   }
 
   override def receive: Receive = {
@@ -214,21 +215,22 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
       startTime = System.currentTimeMillis()
       if (numberOfOperations > 0) {
         writeLatencyThroughputSchedule = context.system.scheduler.schedule(250 millis, 250 millis) { writeLatencyThroughput() }
-        this.sendOperation()
+        sendOperation()
       } else {
-        this.end()
+        end()
       }
 
     case Response(result: Option[String]) =>
-      this.logInfo(s"Got response value=$result \nOperations left: ${numberOfOperations-1}")
+      log.info(s"Got response value=$result \nOperations left: ${numberOfOperations-1}")
       operationTimeoutSchedule.cancel()
-      this.processResponse()
+      processResponse()
       numberOfOperations -= 1
       if (numberOfOperations > 0) {
-        this.sendOperation()
+        sendOperation()
       } else {
-        this.end()
+        end()
       }
 
   }
+
 }

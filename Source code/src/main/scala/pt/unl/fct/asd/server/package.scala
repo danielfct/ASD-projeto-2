@@ -6,11 +6,16 @@ import scala.collection.SortedMap
 
 package object server {
 
-  // Leader related messages
+  // Membership related messages
   final case class SetLeader(sequenceNumber: Int, leader: Node)
   final case class Node(application: ActorRef, stateMachine: ActorRef, multipaxos: ActorRef)
   final case class UpdateLeader(leader: Node)
   final case object LeaderHeartbeat
+  final case class Join(contactNode: ActorRef)
+  final case class RemoveOldReplica(sequencePosition: Int, replica: ActorRef)
+  final case class AddNewReplica(sequencePosition: Int, replica: ActorRef)
+  final case class SetStateMachineState(sequencePosition: Int, operations: Seq[(Int, Operation)])
+  final case class SetMultiPaxosState(sequencePosition: Int, newReplicas: Set[ActorSelection], newPromise: Int)
 
   // Prepare related messages
   final case class Prepare(sequencePosition: Int, sequenceNumber: Int)
@@ -21,14 +26,8 @@ package object server {
   final case class Accept(sequencePosition: Int, sequenceNumber: Int, operation: List[Operation])
   final case class Accept_OK(sequencePosition: Int, sequenceNumber: Int, operation: List[Operation])
   final case class Decided(sequencePosition: Int, operations: List[Operation])
-  final case class RemoveOldReplica(sequencePosition: Int, replica: ActorRef)
-  final case class AddNewReplica(sequencePosition: Int, replica: ActorRef)
-  final case class SetStateMachineState(sequencePosition: Int, ops: SortedMap[Int, Operation])
-  final case class SetMultiPaxosState(sequencePosition: Int, newReplicas: Set[ActorSelection], newPromise: Int)
 
-  final case class Join(contactNode: ActorRef)
-  final case object Debug
-
+  // Operation related messages
   sealed trait Operation
   final case class ReadOperation(key: String, requestId: String) extends Operation
   final case class WriteOperation(key: String, value: String, requestId: String) extends Operation
@@ -41,10 +40,8 @@ package object server {
 
   final case class WriteValue(key: String, value: String, requestId: String)
   final case class WriteResponse(operation: WriteOperation)
-  /*  final case class ReadValue(key: String, requestId: String)
-    final case class ReadResponse(operation: ReadOperation)*/
   final case class AddReplica(replica: ActorRef)
   final case class RemoveReplica(replica: ActorRef)
 
-
+  final case object Debug
 }

@@ -8,9 +8,9 @@ echo off
 ::set /p multiple="Multiple consoles (yes/no)? "
 set clientInitialDelay=30000
 set clientsNr=5
-set operationsNr=10
+set operationsNr=10000
 set percentageOfWrites=100
-set replicasNr=3
+set replicasNr=5
 set multiple=yes
 
 setlocal enabledelayedexpansion

@@ -81,7 +81,8 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
     logInfo(s"Adding replica: $replica at position $seqPosition")
     multipaxos ! AddNewReplica(seqPosition, replica)
     if (leader == self) {
-      replica ! SetStateMachineState(sequencePosition, operations.filterKeys(_ < seqPosition))
+      logInfo(s"Setting replica state sequencePosition $seqPosition, operations ${operations.filterKeys(_ < seqPosition).toSeq}")
+      replica ! SetStateMachineState(seqPosition, operations.filterKeys(_ < seqPosition).toSeq)
     }
   }
 
@@ -96,7 +97,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
     proposeOperationsSchedule = context.system.scheduler.schedule(0 millis, BATCH_TIME_LIMIT millis) {
       if (operationsWaiting.size >= BATCH_SIZE || operationsWaiting.nonEmpty && System.currentTimeMillis() >= nextBatchTimeLimit) {
         numberOfOperationsProposed = operationsWaiting.size
-        multipaxos ! Propose(sequencePosition, operationsWaiting.toList)
+        multipaxos ! Propose(sequencePosition, operationsWaiting.toList) //TODO ver situacao do add/remove replica
         proposeOperationsSchedule.cancel()
         logInfo(s"Proposed batch $operationsWaiting with size ${operationsWaiting.size}")
       }
@@ -104,7 +105,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
   }
 
   private def logInfo(msg: String): Unit = {
-    log.info(s"\n${self.path.name}: $msg")
+    /*log.info(s"\n${self.path.name}: $msg")*/
   }
 
   override def receive: PartialFunction[Any, Unit] = {
@@ -181,15 +182,17 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       }
       application ! UpdateLeader(newLeader)
 
-    case SetStateMachineState(seqPosition: Int, ops: SortedMap[Int, Operation]) =>
+    case SetStateMachineState(seqPosition: Int, ops: Seq[(Int, Operation)]) =>
       logInfo(s"Setting statemachine state with sequencePosition $seqPosition and operations $ops")
+      val opsMap: SortedMap[Int, Operation] = SortedMap[Int, Operation]() ++ ops.toMap
+      logInfo(s"Deserialized map $ops")
       sequencePosition = seqPosition
-      operations ++= ops
+      operations ++= opsMap
       leader = sender
       executePendingOperations(false)
 
     case Debug =>
-      logInfo(s"\n" +
+      log.info(s"\n" +
         s"  - Multipaxos: $multipaxos\n" +
         s"  - SequencePosition: $sequencePosition\n" +
         s"  - Operations: $operations\n" +

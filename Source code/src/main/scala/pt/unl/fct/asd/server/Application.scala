@@ -34,7 +34,7 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
   val r = new Random
 
   private def logInfo(msg: String): Unit = {
-    log.info(s"\n${self.path.name}: $msg")
+    /*log.info(s"\n${self.path.name}: $msg")*/
   }
 
   override def receive(): PartialFunction[Any, Unit] = {
@@ -89,7 +89,7 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
       leader = newLeader.application
 
     case Debug =>
-      logInfo(s"\n" +
+      log.info(s"\n" +
         s"  - StateMachine: $stateMachine\n" +
         s"  - KeyValueStore: $keyValueStore\n" +
         s"  - LastClientWrites: $lastClientWrites\n" +
