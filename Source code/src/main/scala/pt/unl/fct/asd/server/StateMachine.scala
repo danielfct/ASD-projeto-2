@@ -58,11 +58,9 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
   }*/
 
   private def executePendingOperations(): Unit = {
-    //TODO se a replica estiver ainda a ser copiada, vai executar as operações pela ordem errada
-    var previousPosition = -1
     breakable {
       for ((currentPosition, operation) <- operations.drop(lastExecutedOperationPosition + 1).iterator) {
-        if (previousPosition != -1 && previousPosition - currentPosition != 1) {
+        if (currentPosition - lastExecutedOperationPosition != 1) {
           break
         }
         operation match {
@@ -76,7 +74,6 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
             log.error(s"Got unexpected operation $operation")
         }
         lastExecutedOperationPosition = currentPosition
-        previousPosition = currentPosition
       }
     }
   }
