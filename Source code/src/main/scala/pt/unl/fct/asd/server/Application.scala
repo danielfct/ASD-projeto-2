@@ -52,12 +52,12 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
 
     case msg @ Write(key: String, value: String, timestamp: Long) =>
       logInfo(s"Write key=$key value=$value timestamp=$timestamp")
-      val requestId: String = s"${sender.path}_$timestamp"
+      val requestId: String = s"${sender.path}::$timestamp"
       if (lastClientWrites.contains(requestId)) {
         sender ! Response(result = lastClientWrites.get(requestId))
       } else if (leader != null) {
-        pendingWrites += requestId
-        if (self == leader) {
+        if (leader == self) {
+          pendingWrites += requestId
           stateMachine ! WriteValue(key, value, requestId)
         } else {
           leader forward msg
@@ -70,8 +70,8 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
       val value: String = operation.value
       val requestId: String = operation.requestId
       val result = keyValueStore.get(key)
-      val clientInfo: Array[String] = requestId.split("_")
-      lastClientWrites = lastClientWrites.filterKeys(k => !k.contains(clientInfo(0)))
+      val clientInfo: Array[String] = requestId.split("::")
+      lastClientWrites = lastClientWrites.filterKeys(k => !k.contains(requestId))
       lastClientWrites += (requestId -> value)
       keyValueStore += (key -> value)
       if (pendingWrites.contains(requestId)) {
@@ -98,7 +98,7 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
       stateMachine ! Debug
 
     case msg @ _ =>
-      log.warning(s"\nGot unexpected message $msg from $sender")
+      log.error(s"\nGot unexpected message $msg from $sender")
 
   }
 

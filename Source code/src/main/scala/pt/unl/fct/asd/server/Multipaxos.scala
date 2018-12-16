@@ -54,13 +54,16 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
 
   private def overrideLeader(): Unit = {
     this.logInfo(s"Trying to be the leader")
+    leader = null
+    stateMachine ! UpdateLeader(Node(null, null, null))
     prepareAcks = 0
     replicas.foreach(replica => {
       this.logInfo(s"Sending prepare to $replica")
       replica ! Prepare(sequencePosition, sequenceNumber)
     })
-    if (prepareTimeoutSchedule != null)
+    if (prepareTimeoutSchedule != null) {
       prepareTimeoutSchedule.cancel()
+    }
     prepareTimeoutSchedule = context.system.scheduler.scheduleOnce(5 seconds) { prepareTimeout() }
   }
 
@@ -80,8 +83,6 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       if (System.currentTimeMillis() > leaderLastHeartbeat + LEADER_TTL) {
         monitorLeaderSchedule.cancel()
         oldLeader = leader
-        leader = null
-        stateMachine ! UpdateLeader(null)
         this.overrideLeader()
       }
     } else {
@@ -123,14 +124,12 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
         }
         if (newLeader.multipaxos == self) { // self becomes leader
           leaderHeartbeatSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds) { signalLeaderAlive() }
-          sequenceNumber = 0
           if (oldLeader != null && leader != self) {
             context.system.scheduler.scheduleOnce(5 seconds) { proposeOldLeaderRemoval() }
           }
         }
         leader = newLeader.multipaxos
         stateMachine ! UpdateLeader(newLeader)
-        promise = 0
         if (leader != self) {
           monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds) { checkLeaderAlive() }
           leaderLastHeartbeat = System.currentTimeMillis()
@@ -155,14 +154,12 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       } else {
         logInfo(s"Rejecting prepare from $sender because promise $promise >= sequenceNumber $seqNumber")
       }
-    /*      if (seqNumber > sequenceNumber && prepareTimeout != null) //TODO confirmar isto
-            prepareTimeout.cancel()*/
 
     case Prepare_OK(seqPosition: Int, seqNumber: Int) =>
       logInfo(s"Got prepare_ok from $sender")
       if (seqNumber == sequenceNumber) {
         prepareAcks += 1
-        if (prepareAcks >= majority) {
+        if (prepareAcks == majority) {
           if (prepareTimeoutSchedule != null)
             prepareTimeoutSchedule.cancel()
           logInfo(s"Got majority. I'm the leader now")
@@ -175,10 +172,10 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
         logInfo(s"Proposing $ops for position $seqPosition")
         sequencePosition = seqPosition
         operations = ops
+        acceptedAcks = 0
         replicas.foreach(replica => replica ! Accept(seqPosition, sequenceNumber, ops))
         acceptTimeoutSchedule = context.system.scheduler.scheduleOnce(5 seconds) {
           logInfo(s"Accept timed out! New sequence number = ${sequenceNumber + replicas.size}")
-          acceptedAcks = 0
           sequenceNumber = sequenceNumber + replicas.size
           self ! Propose(sequencePosition, operations)
         }
@@ -188,9 +185,9 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
 
     case Accept(seqPosition: Int, seqNumber: Int, ops: List[Operation]) =>
       logInfo(s"Got accept request from $sender with sequenceNumber $seqNumber to position $seqPosition")
-
       if (seqNumber >= promise && sender == leader) {
         logInfo(s"Accepted operation $ops for position $seqPosition")
+        promise = 0
         sequencePosition = seqPosition
         operations = ops
         sender ! Accept_OK(seqPosition, seqNumber, ops)
@@ -199,22 +196,27 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       }
 
     case Accept_OK(seqPosition: Int, seqNumber: Int, ops: List[Operation]) =>
-      if (seqPosition == sequencePosition && seqNumber >= promise) {
+      logInfo(s"Got accept_ok from $sender with sequenceNumber $seqNumber, position $seqPosition and operations $ops")
+      if (seqNumber == sequenceNumber) {
+        logInfo(s"Accepted accept_ok for position $seqPosition with sequenceNumber $seqNumber and operations $ops")
         acceptedAcks += 1
         if (acceptedAcks == majority) {
           logInfo(s"Got accept_ok from majority for position $seqPosition")
+          sequenceNumber = 0
           if (acceptTimeoutSchedule != null) {
             acceptTimeoutSchedule.cancel()
           }
           replicas.foreach(replica => replica ! Decided(seqPosition, ops))
         }
+      } else {
+        logInfo(s"Rejected accept_ok with sequenceNumber $seqNumber because sequenceNumber $seqNumber != mySequenceNumber $sequenceNumber")
       }
 
     case msg @ Decided(_, _) =>
       stateMachine forward msg
 
     case AddNewReplica(seqPosition: Int, replica: ActorRef) =>
-      logInfo(s"Adding replica: $replica")
+      logInfo(s"Adding replica $replica")
       val replicaSelection = context.actorSelection(s"akka.tcp://$replica")
       replicas += replicaSelection
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
@@ -223,18 +225,20 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       }
 
     case RemoveOldReplica(seqPosition: Int, replica: ActorRef) =>
-      logInfo(s"Removing replica: $replica")
+      logInfo(s"Removing replica $replica")
       val replicaSelection = context.actorSelection(s"akka.tcp://$replica")
       replicas -= replicaSelection
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
 
     case SetMultiPaxosState(seqPosition: Int, newReplicas: Set[ActorSelection], newPromise: Int) =>
+      logInfo(s"Setting multipaxos state with sequencePosition $seqPosition, replicas $newReplicas and promise $promise")
       replicas = newReplicas
       majority = Math.ceil((replicas.size + 1.0) / 2.0).toInt
       leader = sender
       promise = newPromise
       sequencePosition = seqPosition
       monitorLeaderSchedule = context.system.scheduler.schedule(3 seconds, 3 seconds) { checkLeaderAlive() }
+      leaderLastHeartbeat = System.currentTimeMillis()
 
     case msg @ SetStateMachineState(_, _) =>
       stateMachine forward msg
@@ -253,7 +257,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
         s"  - LeaderLastHeartbeat: ${new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS").format(new Date(leaderLastHeartbeat))}")
 
     case msg @ _ =>
-      log.warning(s"\nGot unexpected message $msg from $sender")
+      log.error(s"\nGot unexpected message $msg from $sender")
 
   }
 }

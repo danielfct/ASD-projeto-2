@@ -1,11 +1,11 @@
 echo off
 
-::set /p initialDelay="Initial delay: "
+::set /p clientInitialDelay="Client initial delay: "
 ::set /p clientsNr="Number of clients: "
 ::set /p operationsNr="Number of operations: "
 ::set /p replicasNr="Number of replicas: "
 ::set /p multiple="Multiple consoles (yes/no)? "
-set initialDelay=30000
+set clientInitialDelay=30000
 set clientsNr=1
 set operationsNr=10
 set replicasNr=3
@@ -21,7 +21,7 @@ for /L %%i in (1, 1, %replicasNr%) Do (
 	set multipaxos=!multipaxos! 127.0.0.1:!port!/user/application%%i/stateMachine%%i/multipaxos%%i
 )
 
-start sbt "runMain pt.unl.fct.asd.client.Client %initialDelay% %clientsNr% %operationsNr% 127.0.0.1 5150%applications%"
+start sbt "runMain pt.unl.fct.asd.client.Client %clientInitialDelay% %clientsNr% %operationsNr% 127.0.0.1 5150%applications%"
 
 for /L %%i in (1, 1, %replicasNr%) Do (
 	set /a "port=5150+%%i"
@@ -31,6 +31,5 @@ for /L %%i in (1, 1, %replicasNr%) Do (
 		start /B sbt "runMain pt.unl.fct.asd.server.Application %%i 127.0.0.1 !port!%multipaxos%"
 	)
 )
-
 
 endlocal

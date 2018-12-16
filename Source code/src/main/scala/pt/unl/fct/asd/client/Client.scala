@@ -40,9 +40,9 @@ object Client extends App {
 class Client(val initialDelay: Long, var numberOfOperations: Int, val replicasInfo: Array[String]) extends Actor with ActorLogging {
 
   val replicas: Set[ActorSelection] = this.selectReplicas(replicasInfo)
-  var requests: Map[OperationInfo, Operation] = Map.empty[OperationInfo, Operation]
+  var requests: Map[String, OperationInfo] = Map.empty[String, OperationInfo] // requestId -> (operation, sendTime, replyTime)
   var lastOperation: Operation = _
-  var startTime: Long = -1L
+  var startTime: Long = 0
   var numberOfReads: Int = 0
   var numberOfWrites: Int = 0
   var numberOfTimeouts: Int = 0
@@ -74,15 +74,15 @@ class Client(val initialDelay: Long, var numberOfOperations: Int, val replicasIn
   }
 
   private def resendRead(key: String): Unit = {
-    this.logInfo(s"\nResent read operation key=$key")
+    this.logInfo(s"Resent read operation key=$key")
     randomReplica ! Read(key)
-    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis, self, OperationTimeout(lastOperation))
+    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis) { operationTimeout() }
   }
 
   private def resendWrite(key: String, value: String, timestamp: Long): Unit = {
-    this.logInfo(s"\nResent write operation key=$key value=$value")
+    this.logInfo(s"Resent write operation key=$key value=$value")
     randomReplica ! Write(key, value, timestamp)
-    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis, self, OperationTimeout(lastOperation))
+    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis) { operationTimeout() }
   }
 
   private def sendOperation(): Unit = {
@@ -90,56 +90,72 @@ class Client(val initialDelay: Long, var numberOfOperations: Int, val replicasIn
     lastOperation match {
       case ReadOperation(key: String, requestId: String) =>
         val timestamp = requestId.toLong
-        requests += OperationInfo(timestamp, -1L) -> lastOperation
+        requests += requestId -> OperationInfo(lastOperation, timestamp, -1L)
         numberOfReads += 1
         randomReplica ! Read(key)
         this.logInfo(s"Sent read operation key=$key")
       case WriteOperation(key: String, value: String, requestId: String) =>
         val timestamp = requestId.toLong
-        requests += OperationInfo(timestamp, -1L) -> lastOperation
+        requests += requestId -> OperationInfo(lastOperation, timestamp, -1L)
         numberOfWrites += 1
         randomReplica ! Write(key, value, timestamp)
         this.logInfo(s"Sent write operation key=$key value=$value")
       case _ =>
-        log.warning(s"\nClient can't execute operation $lastOperation")
+        log.error(s"\nClient can't execute operation $lastOperation")
     }
-    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis, self, OperationTimeout(lastOperation))
+    operationTimeoutSchedule = context.system.scheduler.scheduleOnce(OPERATION_TIMEOUT millis) { operationTimeout() }
   }
 
   private def processResponse(): Unit = {
+    val responseTimestamp = System.currentTimeMillis()
     lastOperation match {
       case ReadOperation(_, requestId: String) =>
-        requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
-        requests += OperationInfo(requestId.toLong, System.currentTimeMillis()) -> lastOperation
+        val sendTimestamp: Long = requests(requestId).sendTimestamp
+        requests -= requestId
+        requests += requestId -> OperationInfo(lastOperation, sendTimestamp, responseTimestamp)
       case WriteOperation(_, _, requestId: String) =>
-        requests = requests.filterKeys(k => !k.equals(OperationInfo(requestId.toLong, -1)))
-        requests += OperationInfo(requestId.toLong, System.currentTimeMillis()) -> lastOperation
+        val sendTimestamp: Long = requests(requestId).sendTimestamp
+        requests -= requestId
+        requests += requestId -> OperationInfo(lastOperation, sendTimestamp, responseTimestamp)
       case _ =>
-        log.warning(s"\nClient can't recieve response for operation $lastOperation")
+        log.error(s"\nClient can't recieve response for operation $lastOperation")
+    }
+  }
+
+  private def operationTimeout(): Unit = {
+    this.logInfo(s"Timeout $lastOperation")
+    numberOfTimeouts += 1
+    lastOperation match {
+      case ReadOperation(key: String, requestId: String) =>
+        requests -= requestId
+        requests += requestId -> OperationInfo(lastOperation, System.currentTimeMillis(), -1)
+        resendRead(key)
+      case WriteOperation(key: String, value: String, requestId: String) =>
+        requests -= requestId
+        requests += requestId -> OperationInfo(lastOperation, System.currentTimeMillis(), -1)
+        resendWrite(key, value, requestId.toLong)
+      case _ =>
+        log.error(s"\nClient can't execute operation $lastOperation")
     }
   }
 
   private def end(): Unit = {
-    printStats()
-  }
-
-  private def printStats(): Unit = {
     val endTime: Long = System.currentTimeMillis()
     val durationMillis: Long = endTime - startTime
     val durationSeconds: Float = if (durationMillis == 0) 0 else durationMillis/1000f
     var totalReadsLatency: Int = 0
     var totalWritesLatency: Int = 0
     var totalLatency: Int = 0
-    for ((operationInfo, operation) <- requests) {
+    for ((_, operationInfo) <- requests) {
       val latency: Int = (operationInfo.responseTimestamp - operationInfo.sendTimestamp).toInt
       totalLatency += latency
-      operation match {
+      operationInfo.operation match {
         case ReadOperation(_, _) =>
           totalReadsLatency += latency
         case WriteOperation(_, _, _) =>
           totalWritesLatency += latency
         case _ =>
-          log.warning(s"\nClient executed unexpected operation $operation")
+          log.error(s"\nClient executed unexpected operation ${operationInfo.operation}")
       }
     }
     val requestsPerSecond: Float = if (durationMillis == 0) 0 else requests.size/durationSeconds
@@ -156,6 +172,7 @@ class Client(val initialDelay: Long, var numberOfOperations: Int, val replicasIn
       s"Number of writes: $numberOfWrites\n" +
       s"Number of timeouts: $numberOfTimeouts\n" +
       s"Requests: $requests\n")
+    Thread.sleep(10000)
     replicas.foreach(replica => replica ! Debug)
   }
 
@@ -188,18 +205,6 @@ class Client(val initialDelay: Long, var numberOfOperations: Int, val replicasIn
         this.sendOperation()
       } else {
         this.end()
-      }
-
-    case OperationTimeout(operation: Operation) =>
-      this.logInfo(s"Timeout $operation")
-      numberOfTimeouts += 1
-      operation match {
-        case ReadOperation(key: String, _) =>
-          resendRead(key)
-        case WriteOperation(key: String, value: String, requestId: String) =>
-          resendWrite(key, value, requestId.toLong)
-        case _ =>
-          log.warning(s"\nClient can't execute operation $operation")
       }
 
   }

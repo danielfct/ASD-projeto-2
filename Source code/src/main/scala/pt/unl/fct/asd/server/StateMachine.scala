@@ -27,16 +27,38 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
   var multipaxos: ActorRef = context.actorOf(Multipaxos.props(application, self, sequenceNumber, replicasInfo), "multipaxos"+sequenceNumber)
   var sequencePosition: Int = 0
   var operations: SortedMap[Int, Operation] = SortedMap.empty[Int, Operation]
-  var lastExecutedOperationPosition: Int = 0
+  var lastExecutedOperationPosition: Int = -1
   var operationsWaiting: ListBuffer[Operation] =  ListBuffer.empty[Operation] // operations waiting to be proposed in the next batch
   var numberOfOperationsProposed: Int = 0
   var leader: ActorRef = _
   var proposeOperationsSchedule: Cancellable = _
-  val BATCH_SIZE: Int = 10
+  val BATCH_SIZE: Int = 5
   val BATCH_TIME_LIMIT: Int = 500 // forçar um propose se houverem operações à espera durante mais de 500 milliseconds
   var nextBatchTimeLimit: Long = 0
 
+
+/*  case ExecuteOperations => {
+    var opsToExecute = operationsToExecute.drop(positionOfLastOpExecuted)
+    if (opsToExecute.nonEmpty) {
+      var it = opsToExecute.iterator
+      var (previous, operation) = it.next()
+      positionOfLastOpExecuted += 1
+      doOperation(operation)
+      breakable {
+        for ((position, operation) <- it) {
+          if (position - previous != 1) {
+            break
+          }
+          doOperation(operation)
+          positionOfLastOpExecuted = position+1
+          previous = position
+        }
+      }
+    }
+  }*/
+
   private def executePendingOperations(): Unit = {
+    //TODO se a replica estiver ainda a ser copiada, vai executar as operações pela ordem errada
     var previousPosition = -1
     breakable {
       for ((currentPosition, operation) <- operations.drop(lastExecutedOperationPosition + 1).iterator) {
@@ -100,7 +122,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       logInfo(s"Got write request key=$key value=$value requestId=$requestId from $sender")
       if (leader != null) {
         if (leader == self) {
-          logInfo(s"Proposed write request $requestId")
+          logInfo(s"Got write request $requestId to propose")
           operationsWaiting += WriteOperation(key, value, requestId)
         } else {
           logInfo(s"Write request $requestId redirected to leader $leader")
@@ -113,7 +135,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
     case msg @ AddReplica(replica: ActorRef) =>
       if (leader != null) {
         if (leader == self) {
-          logInfo(s"Proposed Add replica $replica request")
+          logInfo(s"Got Add replica $replica request to propose")
           operationsWaiting += AddReplicaOperation(replica) //TODO não fazer batch de addreplica
         } else {
           logInfo(s"Add replica $replica request redirected to leader $leader")
@@ -126,7 +148,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
     case msg @ RemoveReplica(replica: ActorRef) =>
       if (leader != null) {
         if (leader == self) {
-          logInfo(s"Proposed Remove replica $replica request")
+          logInfo(s"Got Remove replica $replica request to propose")
           operationsWaiting += RemoveReplicaOperation(replica)  //TODO não fazer batch de removereplica
         } else {
           logInfo(s"Remove replica $replica request redirected to leader $leader")
@@ -142,10 +164,12 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
         operations += (seqPosition + index) -> op
       }}
       sequencePosition += ops.size
-      operationsWaiting = operationsWaiting.drop(numberOfOperationsProposed + 1)
-      numberOfOperationsProposed = 0
       executePendingOperations()
       if (leader == self) {
+        logInfo(s"Total operations waiting $operationsWaiting")
+        operationsWaiting = operationsWaiting.drop(numberOfOperationsProposed + 1)
+        logInfo(s"Operations waiting after decided $operationsWaiting")
+        numberOfOperationsProposed = 0
         scheduleProposes()
       }
 
@@ -167,6 +191,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       application ! UpdateLeader(newLeader)
 
     case SetStateMachineState(seqPosition: Int, ops: SortedMap[Int, Operation]) =>
+      logInfo(s"Setting statemachine state with sequencePosition $seqPosition and operations $ops")
       sequencePosition = seqPosition
       operations ++= ops
       leader = sender
