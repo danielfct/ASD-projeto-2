@@ -5,7 +5,6 @@ import java.util.Date
 
 import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, Cancellable, Props}
 
-import scala.collection.SortedMap
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -154,6 +153,8 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       } else {
         logInfo(s"Rejecting prepare from $sender because promise $promise >= sequenceNumber $seqNumber")
       }
+      if (seqNumber > sequenceNumber && prepareTimeoutSchedule != null)
+        prepareTimeoutSchedule.cancel()
 
     case Prepare_OK(seqPosition: Int, seqNumber: Int) =>
       logInfo(s"Got prepare_ok from $sender")

@@ -4,17 +4,13 @@ package server
 import java.text.SimpleDateFormat
 import java.util.Date
 
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, ActorSystem, Cancellable, Props}
-import akka.util.Timeout
-import com.typesafe.config.Config
+import akka.actor.{Actor, ActorLogging, ActorRef, Cancellable, Props}
 
 import scala.collection.SortedMap
 import scala.collection.mutable.ListBuffer
-import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.language.postfixOps
-import scala.util.Random
 import scala.util.control.Breaks._
 
 object StateMachine {
@@ -28,48 +24,46 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
   var sequencePosition: Int = 0
   var operations: SortedMap[Int, Operation] = SortedMap.empty[Int, Operation]
   var lastExecutedOperationPosition: Int = -1
+  var numberOfFilteredOperations: Int = 0
   var operationsWaiting: ListBuffer[Operation] =  ListBuffer.empty[Operation] // operations waiting to be proposed in the next batch
   var numberOfOperationsProposed: Int = 0
   var leader: ActorRef = _
   var proposeOperationsSchedule: Cancellable = _
   val BATCH_SIZE: Int = 5
-  val BATCH_TIME_LIMIT: Int = 500 // forçar um propose se houverem operações à espera durante mais de 500 milliseconds
+  val BATCH_TIME_LIMIT: Int = 500 // force propose when operations are waiting for at least 500 ms
   var nextBatchTimeLimit: Long = 0
 
-
-/*  case ExecuteOperations => {
-    var opsToExecute = operationsToExecute.drop(positionOfLastOpExecuted)
-    if (opsToExecute.nonEmpty) {
-      var it = opsToExecute.iterator
-      var (previous, operation) = it.next()
-      positionOfLastOpExecuted += 1
-      doOperation(operation)
-      breakable {
-        for ((position, operation) <- it) {
-          if (position - previous != 1) {
-            break
-          }
-          doOperation(operation)
-          positionOfLastOpExecuted = position+1
-          previous = position
-        }
-      }
-    }
-  }*/
-
-  private def executePendingOperations(): Unit = {
+  private def executePendingOperations(implicit ordered: Boolean = true): Unit = {
+    logInfo(s"Trying to execute operations ${operations.drop(lastExecutedOperationPosition - numberOfFilteredOperations + 1)}\n" +
+      s"lastExecutedOperationPosition=$lastExecutedOperationPosition, numberOfFilteredOperations=$numberOfFilteredOperations")
     breakable {
-      for ((currentPosition, operation) <- operations.drop(lastExecutedOperationPosition + 1).iterator) {
-        if (currentPosition - lastExecutedOperationPosition != 1) {
+      for ((currentPosition, operation) <- operations.drop(lastExecutedOperationPosition - numberOfFilteredOperations + 1).iterator) {
+        if (ordered && currentPosition - lastExecutedOperationPosition != 1) {
           break
         }
         operation match {
           case WriteOperation(key, value, requestId) =>
             writeValue(key, value, requestId)
+            val filteredOperations = operations.filter(e => {
+              e._2 match {
+                case op: WriteOperation =>
+                  /*logInfo(s"op.key=${op.key} key=$key e._1=${e._1} < currentPosition=$currentPosition")*/
+                  !(op.key == key && e._1 < currentPosition)
+                case _ =>
+                  true
+              }
+            })
+            /*logInfo(s"Before filtering $operations,\nafter filtering $filteredOperations")*/
+            numberOfFilteredOperations += operations.size - filteredOperations.size
+            operations = filteredOperations
           case AddReplicaOperation(replica) =>
             addReplica(replica, currentPosition)
+            numberOfFilteredOperations += 1
+            operations -= currentPosition
           case RemoveReplicaOperation(replica) =>
             removeReplica(replica, currentPosition)
+            numberOfFilteredOperations += 1
+            operations -= currentPosition
           case _ =>
             log.error(s"Got unexpected operation $operation")
         }
@@ -164,7 +158,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       executePendingOperations()
       if (leader == self) {
         logInfo(s"Total operations waiting $operationsWaiting")
-        operationsWaiting = operationsWaiting.drop(numberOfOperationsProposed + 1)
+        operationsWaiting = operationsWaiting.drop(numberOfOperationsProposed)
         logInfo(s"Operations waiting after decided $operationsWaiting")
         numberOfOperationsProposed = 0
         scheduleProposes()
@@ -192,7 +186,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       sequencePosition = seqPosition
       operations ++= ops
       leader = sender
-      executePendingOperations()
+      executePendingOperations(false)
 
     case Debug =>
       logInfo(s"\n" +

@@ -1,16 +1,9 @@
 package pt.unl.fct.asd
 package server
 
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSelection, ActorSystem, Props}
-import akka.util.Timeout
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, Props}
 import com.typesafe.config.Config
-import pt.unl.fct.asd.{buildConfiguration, client}
-import pt.unl.fct.asd.client.Client
-import pt.unl.fct.asd.client.Client.args
-import pt.unl.fct.asd.server.Application.{replicasInfo, sequenceNumber, system}
 
-import scala.concurrent.duration._
-import scala.concurrent.Await
 import scala.util.Random
 
 object Application extends App {
@@ -46,17 +39,24 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
 
   override def receive(): PartialFunction[Any, Unit] = {
 
-    case Read(key: String) =>
-      logInfo(s"Read key=$key value=${keyValueStore.get(key)}")
-      sender ! Response(result = keyValueStore.get(key))
+    case msg @ Read(key: String) =>
+      if (leader != null) {
+        if (leader == self) {
+          logInfo(s"Replying to the client ReadOperation key=$key value=${keyValueStore.get(key)}")
+          sender ! Response(result = keyValueStore.get(key))
+        } else {
+          leader forward msg
+        }
+      }
 
     case msg @ Write(key: String, value: String, timestamp: Long) =>
-      logInfo(s"Write key=$key value=$value timestamp=$timestamp")
       val requestId: String = s"${sender.path}::$timestamp"
       if (lastClientWrites.contains(requestId)) {
+        logInfo(s"Replying to the client WriteOperation key=$key value=$value timestamp=$timestamp without proposing")
         sender ! Response(result = lastClientWrites.get(requestId))
       } else if (leader != null) {
         if (leader == self) {
+          logInfo(s"Write key=$key value=$value timestamp=$timestamp")
           pendingWrites += requestId
           stateMachine ! WriteValue(key, value, requestId)
         } else {
@@ -71,7 +71,7 @@ class Application(replicasInfo: Array[String], sequenceNumber: Int) extends Acto
       val requestId: String = operation.requestId
       val result = keyValueStore.get(key)
       val clientInfo: Array[String] = requestId.split("::")
-      lastClientWrites = lastClientWrites.filterKeys(k => !k.contains(requestId))
+      lastClientWrites = lastClientWrites.filterKeys(k => !k.contains(clientInfo(0)))
       lastClientWrites += (requestId -> value)
       keyValueStore += (key -> value)
       if (pendingWrites.contains(requestId)) {

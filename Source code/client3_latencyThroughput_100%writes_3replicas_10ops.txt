@@ -1,0 +1,36 @@
+0 3.3444817
+0 1.9455253
+0 1.3140604
+0 1.0
+0 0.786782
+638 1.2795906
+638 1.1318619
+591 1.4691478
+591 1.3233348
+577 1.5929909
+577 1.4519056
+563 1.6666666
+563 1.5379883
+558 1.7089149
+558 1.598721
+558 1.7504376
+558 1.6401124
+555 1.76952
+555 1.6813787
+551 1.7971246
+551 1.7064846
+547 1.8181819
+547 1.7337031
+Start time: 16/12/2018 06:28:52.979
+End time: 16/12/2018 06:28:58.979
+Duration: 6000 milliseconds (6.0 seconds)
+Average latency: 599 milliseconds
+Reads average latency: 0 milliseconds
+Writes average latency: 599 milliseconds
+Average throughput: 1.6666666 operations per second
+Number of requests: 10
+Number of reads: 0
+Number of writes: 10
+Number of timeouts: 0
+Percentage of writes: 100%
+Number of replicas: 3
