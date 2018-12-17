@@ -97,7 +97,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
     proposeOperationsSchedule = context.system.scheduler.schedule(0 millis, BATCH_TIME_LIMIT millis) {
       if (operationsWaiting.size >= BATCH_SIZE || operationsWaiting.nonEmpty && System.currentTimeMillis() >= nextBatchTimeLimit) {
         numberOfOperationsProposed = operationsWaiting.size
-        multipaxos ! Propose(sequencePosition, operationsWaiting.toList) //TODO ver situacao do add/remove replica
+        multipaxos ! Propose(sequencePosition, operationsWaiting.toList)
         proposeOperationsSchedule.cancel()
         logInfo(s"Proposed batch $operationsWaiting with size ${operationsWaiting.size}")
       }
@@ -128,7 +128,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       if (leader != null) {
         if (leader == self) {
           logInfo(s"Got Add replica $replica request to propose")
-          operationsWaiting += AddReplicaOperation(replica) //TODO não fazer batch de addreplica
+          operationsWaiting += AddReplicaOperation(replica)
         } else {
           logInfo(s"Add replica $replica request redirected to leader $leader")
           leader forward msg
@@ -141,7 +141,7 @@ class StateMachine(val application: ActorRef, val sequenceNumber: Int, val repli
       if (leader != null) {
         if (leader == self) {
           logInfo(s"Got Remove replica $replica request to propose")
-          operationsWaiting += RemoveReplicaOperation(replica)  //TODO não fazer batch de removereplica
+          operationsWaiting += RemoveReplicaOperation(replica)
         } else {
           logInfo(s"Remove replica $replica request redirected to leader $leader")
           leader forward msg
