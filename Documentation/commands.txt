@@ -4,7 +4,7 @@ sbt "runMain pt.unl.fct.asd.server.Application 2 127.0.0.1 5152 127.0.0.1:5151/u
 
 sbt "runMain pt.unl.fct.asd.server.Application 3 127.0.0.1 5153 127.0.0.1:5151/user/application1/stateMachine1/multipaxos1 127.0.0.1:5152/user/application2/stateMachine2/multipaxos2 127.0.0.1:5153/user/application3/stateMachine3/multipaxos3"
 
-sbt "runMain pt.unl.fct.asd.client.Client 30000 5 100 50 127.0.0.1 5150 127.0.0.1:5151/user/application1 127.0.0.1:5152/user/application2 127.0.0.1:5152/user/application3"
+sbt "runMain pt.unl.fct.asd.client.Tester 60000 5 100 50 127.0.0.1 5150 127.0.0.1:5151/user/application1 127.0.0.1:5152/user/application2 127.0.0.1:5152/user/application3"
 
 
 sbt "runMain pt.unl.fct.asd.server.Application 4 127.0.0.1 5154 127.0.0.1:5151/user/application1/stateMachine1/multipaxos1"

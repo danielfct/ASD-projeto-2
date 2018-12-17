@@ -15,13 +15,6 @@ package object asd {
       }
       actor {
         provider = "akka.remote.RemoteActorRefProvider"
-        serializers {
-          proto = "akka.remote.serialization.ProtobufSerializer"
-        }
-        serialization-bindings {
-          "pt.unl.fct.asd.client.package" = proto
-          "pt.unl.fct.asd.server.package" = proto
-        }
       }
       remote {
         enabled-transports = ["akka.remote.netty.tcp"]

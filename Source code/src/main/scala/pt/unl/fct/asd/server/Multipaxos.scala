@@ -35,7 +35,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
 
   start()
 
-  def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
+  private def selectReplicas(replicasInfo: Array[String]): Set[ActorSelection] = {
     var replicas: Set[ActorSelection] = Set.empty[ActorSelection]
     replicasInfo.foreach(replica => replicas += context.actorSelection(s"akka.tcp://Server@$replica"))
     logInfo(s"Initial replicas: $replicas")
@@ -47,12 +47,11 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       val contactNode: ActorSelection = replicas.toSeq.head
       contactNode ! AddReplica(self)
     } else {
-      overrideLeader()
+      tryToOverrideLeader()
     }
   }
 
-  private def overrideLeader(): Unit = {
-
+  private def tryToOverrideLeader(): Unit = {
     logInfo(s"Trying to be the leader")
     leader = null
     stateMachine ! UpdateLeader(Node(null, null, null))
@@ -83,7 +82,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
       if (System.currentTimeMillis() > leaderLastHeartbeat + LEADER_TTL) {
         monitorLeaderSchedule.cancel()
         oldLeader = leader
-        overrideLeader()
+        tryToOverrideLeader()
       }
     } else {
       monitorLeaderSchedule.cancel()
@@ -93,7 +92,7 @@ class Multipaxos(val application: ActorRef, val stateMachine: ActorRef, var sequ
   private def prepareTimeout(): Unit = {
     logInfo(s"Prepare timed out. New sequence number = ${sequenceNumber + replicas.size}")
     sequenceNumber += replicas.size
-    overrideLeader()
+    tryToOverrideLeader()
   }
 
   private def proposeOldLeaderRemoval(): Unit = {

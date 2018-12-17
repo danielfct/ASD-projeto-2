@@ -221,7 +221,7 @@ class Client(var numberOfOperations: Int, val percentageOfWrites: Int, val repli
       }
 
     case Response(result: Option[String]) =>
-      log.info(s"Got response value=$result \nOperations left: ${numberOfOperations-1}")
+      logInfo(s"Got response value=$result \nOperations left: ${numberOfOperations-1}")
       operationTimeoutSchedule.cancel()
       processResponse()
       numberOfOperations -= 1
